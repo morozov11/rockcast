@@ -62,7 +62,7 @@ impl RuntimeConfig {
     }
 
     #[cfg(test)]
-    fn for_test(base_url: String, bearer_token: Option<&str>) -> Self {
+    pub(crate) fn for_test(base_url: String, bearer_token: Option<&str>) -> Self {
         Self {
             base_url,
             bearer_token: bearer_token.map(str::to_owned),

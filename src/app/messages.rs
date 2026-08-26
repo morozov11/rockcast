@@ -16,6 +16,10 @@ pub(crate) enum UiMsg {
         image: Option<crate::station_icons::StationIconImage>,
     },
     VoiceResult(Result<crate::voice::VoiceSearchResult, crate::voice::VoiceError>),
+    PairingResult {
+        request_id: String,
+        result: Result<crate::session::AccountProfile, crate::session::PairingPoll>,
+    },
 }
 
 pub(super) fn same_output_device(left: &OutputDevice, right: &OutputDevice) -> bool {

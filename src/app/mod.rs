@@ -7,7 +7,11 @@ mod ui;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, atomic::AtomicBool, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -44,6 +48,12 @@ pub struct RockCastApp {
     pub(super) personal_data: Option<crate::personal_data::PersonalDataStore>,
     pub(super) favourites_open: bool,
     pub(super) history_open: bool,
+    pub(super) account_open: bool,
+    pub(super) pairing: Option<crate::session::PairingRequest>,
+    pub(super) pairing_cancel: Option<Arc<AtomicBool>>,
+    pub(super) account_message: String,
+    pub(super) account_profile: Option<crate::session::AccountProfile>,
+    pub(super) account_devices: Vec<crate::session::Device>,
     pub(super) track: String,
     pub(super) volume: u8,
     pub(super) loading_stations: bool,
@@ -135,6 +145,12 @@ impl RockCastApp {
             personal_data: None,
             favourites_open: false,
             history_open: false,
+            account_open: false,
+            pairing: None,
+            pairing_cancel: None,
+            account_message: String::new(),
+            account_profile: None,
+            account_devices: Vec::new(),
             track: t.track_hint.into(),
             volume,
             loading_stations: false,
@@ -180,6 +196,7 @@ impl eframe::App for RockCastApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.bootstrap();
         self.poll_messages(ctx);
+        self.poll_pairing();
         self.apply_volume_if_needed();
         if self.playing
             && self.playback.relay_active()
@@ -267,6 +284,9 @@ impl eframe::App for RockCastApp {
                         if ui.button(format!("History ({history_count})")).clicked() {
                             self.history_open = true;
                         }
+                        if ui.button("Account").clicked() {
+                            self.account_open = true;
+                        }
                         let favourites_count = self.personal_data.as_ref().map_or(0, |store| {
                             store.favourites().len()
                                 + store
@@ -333,6 +353,7 @@ impl eframe::App for RockCastApp {
                 self.draw_station_list(ui, list_h);
             });
         self.draw_personal_windows(ctx);
+        self.draw_account_window(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -347,5 +368,50 @@ impl eframe::App for RockCastApp {
 impl Drop for RockCastApp {
     fn drop(&mut self) {
         self.shutdown_playback();
+    }
+}
+
+impl RockCastApp {
+    fn poll_pairing(&mut self) {
+        let Some(pairing) = self.pairing.clone() else {
+            return;
+        };
+        if self.pairing_cancel.is_some() {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.pairing_cancel = Some(Arc::clone(&cancel));
+        let tx = self.ui_tx.clone();
+        let rockserver = self.rockserver.clone();
+        let _ = self.playback.spawn_job(move |_| {
+            let client =
+                crate::session::AccountClient::new(rockserver, crate::session::OsCredentialStore);
+            let deadline = Instant::now() + Duration::from_secs(10 * 60);
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                match client.complete_pairing(&pairing) {
+                    Ok(profile) => {
+                        let _ = tx.send(UiMsg::PairingResult {
+                            request_id: pairing.pairing_request_id.clone(),
+                            result: Ok(profile),
+                        });
+                        return;
+                    }
+                    Err(
+                        crate::session::PairingPoll::Pending
+                        | crate::session::PairingPoll::Unavailable,
+                    ) if Instant::now() < deadline => std::thread::sleep(Duration::from_secs(2)),
+                    Err(reason) => {
+                        let _ = tx.send(UiMsg::PairingResult {
+                            request_id: pairing.pairing_request_id.clone(),
+                            result: Err(reason),
+                        });
+                        return;
+                    }
+                }
+            }
+        });
     }
 }

@@ -306,6 +306,32 @@ impl RockCastApp {
                         }
                     }
                 }
+                UiMsg::PairingResult { request_id, result } => {
+                    if self
+                        .pairing
+                        .as_ref()
+                        .is_none_or(|pairing| pairing.pairing_request_id != request_id)
+                    {
+                        continue;
+                    }
+                    self.pairing_cancel = None;
+                    match result {
+                        Ok(profile) => {
+                            self.account_profile = Some(profile);
+                            self.pairing = None;
+                            self.account_message = "This PC is connected.".into();
+                        }
+                        Err(crate::session::PairingPoll::SecureStorageUnavailable) => {
+                            self.pairing = None;
+                            self.account_message = "Secure credential storage is unavailable. RockCast remains offline.".into();
+                        }
+                        Err(_) => {
+                            self.pairing = None;
+                            self.account_message =
+                                "Pairing expired or was rejected. RockCast remains offline.".into();
+                        }
+                    }
+                }
             }
         }
     }

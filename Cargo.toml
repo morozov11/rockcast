@@ -17,6 +17,7 @@ ogg = "0.9"
 opus-decoder = "0.1"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip", "deflate"] }
+qrcode = { version = "0.14", default-features = false }
 ropus = "0.12.18"
 rustfft = "6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -32,7 +33,7 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [[example]]
 name = "eq_profile"

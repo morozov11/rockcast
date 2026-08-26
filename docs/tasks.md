@@ -1,5 +1,15 @@
 # RockCast tasks
 
+## RM-011-E — account and secure session UX (complete)
+
+- [x] Create/complete native desktop pairing through the RM-011-C `/v1` contract.
+- [x] Show a QR/deep link, short code and verification phrase; keep pairing proofs memory-only.
+- [x] Store native credentials with Windows DPAPI, fail closed if protected storage fails,
+      and support refresh, local cleanup/logout, device list and revoke.
+- [x] Cover client requests with local mock HTTP tests; no live RockServer is used.
+- [x] Finish pairing automatically using only the request ID and one-time desktop proof; the
+      approved owner is derived by RockServer.
+
 ## MVP-001-C — official RockServer defaults
 
 - [x] Use the production HTTPS RockServer base URL in official releases.

@@ -1,5 +1,6 @@
 //! egui panels.
 
+mod account;
 mod controls;
 mod devices;
 mod eq;

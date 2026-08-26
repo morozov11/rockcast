@@ -1,5 +1,28 @@
 # RockCast status
 
+## RM-011-E — account and secure session UX (complete, 2026-08-26)
+
+RockCast now has an optional Account & devices dialog. It creates a desktop pairing request via
+the deployed `/v1/pairing-requests` contract, renders the one-time browser deep link as a QR code,
+and displays the short code and verification phrase. The desktop proof and approval secret remain
+only in process memory. Native access/refresh credentials are stored only in a Windows DPAPI
+protected blob (`session.dpapi`); a DPAPI failure leaves RockCast anonymous/offline rather than
+falling back to plaintext settings. The dialog supports silent refresh before profile/device reads,
+remote logout followed by local cleanup, and owner-scoped device revoke. No token is shown or
+written to logs.
+
+RockCast polls completion automatically after browser/passkey approval. Its exact request body is
+only `{ "desktop_token": "…" }`; it never asks for or sends a user ID, and the returned profile
+is accepted only from the server. Local mock HTTP tests cover create/poll/complete, rejection of
+the former extra `user_id`, refresh replay cleanup and offline logout cleanup; full `cargo test`
+passed (85 unit tests and 2 local relay integration tests; 10 live-network tests remain ignored).
+The Windows DPAPI calls compile on this host
+but have not been exercised against a real Windows user profile in CI.
+
+`cargo fmt --check` and `git diff --check` pass. Strict all-target Clippy reaches one pre-existing,
+unrelated `clippy::too_many_arguments` diagnostic in `src/local/mod.rs::play` (8 arguments); no
+new RM-011-E diagnostics remain.
+
 ## Station icons MVP
 
 Implemented for the pre-RockServer-icon phase (2026-08-26).

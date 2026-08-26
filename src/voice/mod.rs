@@ -486,9 +486,12 @@ mod tests {
 
     #[test]
     fn start_message_is_valid_json() {
-        let value: serde_json::Value =
-            serde_json::from_str(&start_message("ru-RU", VOICE_SAMPLE_RATE_HZ, "streaming_v3"))
-                .expect("start message must be valid JSON");
+        let value: serde_json::Value = serde_json::from_str(&start_message(
+            "ru-RU",
+            VOICE_SAMPLE_RATE_HZ,
+            "streaming_v3",
+        ))
+        .expect("start message must be valid JSON");
         assert_eq!(value["type"], "start");
         assert_eq!(value["locale"], "ru-RU");
         assert_eq!(value["sample_rate_hz"], 16_000);

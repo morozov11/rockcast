@@ -16,6 +16,7 @@ pub mod relay;
 /// Optional RockServer search integration.
 pub mod rockserver;
 pub mod runtime;
+pub mod session;
 pub mod settings;
 pub mod station_icons;
 pub mod stations;

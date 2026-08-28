@@ -1,5 +1,19 @@
 # RockCast tasks
 
+## RM-011-G4 — clear PC connection UX (complete, 2026-08-28)
+
+- [x] Call the action “Connect this PC to an account”; pair with a user-editable,
+      server-validated default `RockCast — <PC name>`.
+- [x] Use the G1 create/complete DTOs and the G2 request-specific browser link; show QR,
+      fallback link action, short code, verification phrase, device name, status, expiry and cancel.
+- [x] Show the approved account/device display names without rendering UUIDs, `user_id`, proofs or tokens.
+- [x] Keep anonymous playback independent from account availability; timeout, cancellation,
+      secure-storage failure and offline errors leave local radio available.
+- [x] Connect the published native device list/revoke endpoints to Account & devices.
+- [ ] Browser-side rename and richer device management remain the G3 surface; no new server API
+      was invented here.
+- [ ] Physical staging phone/passkey smoke test remains part of G7.
+
 ## RM-011-E — account and secure session UX (complete)
 
 - [x] Create/complete native desktop pairing through the RM-011-C `/v1` contract.

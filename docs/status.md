@@ -1,5 +1,25 @@
 # RockCast status
 
+## RM-011-G4 — clear PC connection UX (complete, 2026-08-28)
+
+The Account & devices dialog now connects the current PC to an existing Rock account instead of
+presenting RockCast as a separate registration. It starts the published G1 pairing request with
+`device_display_name` and `device_type`, offers the default `RockCast — <PC name>` for editing,
+and renders the G2 request-specific QR/deep-link fallback, short code, verification phrase,
+expiry, status and cancel action.
+
+Completion sends only the desktop proof and accepts the server-derived account/device display
+context. The UI does not render UUIDs, `user_id`, device proofs or native tokens. It shows
+`This PC is connected to account <account_display_name>` and the current device name, and uses
+the published native device list/revoke endpoints. Polling stops on server errors, cancellation
+or a bounded timeout; anonymous/offline playback remains independent. Browser rename and any
+additional device-center operations remain the G3 browser dependency, and physical passkey/phone
+acceptance remains G7.
+
+Local verification for this change: `cargo fmt --check`, `cargo check --all-targets`, and
+`cargo test --all-targets` (88 passed; live network probes remain ignored). No RockServer,
+deployment, commit or push was made.
+
 ## RM-011-E — account and secure session UX (complete, 2026-08-26)
 
 RockCast now has an optional Account & devices dialog. It creates a desktop pairing request via

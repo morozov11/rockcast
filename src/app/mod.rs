@@ -51,6 +51,8 @@ pub struct RockCastApp {
     pub(super) account_open: bool,
     pub(super) pairing: Option<crate::session::PairingRequest>,
     pub(super) pairing_cancel: Option<Arc<AtomicBool>>,
+    pub(super) pairing_device_name: String,
+    pub(super) pairing_status: String,
     pub(super) account_message: String,
     pub(super) account_profile: Option<crate::session::AccountProfile>,
     pub(super) account_devices: Vec<crate::session::Device>,
@@ -148,6 +150,8 @@ impl RockCastApp {
             account_open: false,
             pairing: None,
             pairing_cancel: None,
+            pairing_device_name: default_pairing_device_name(),
+            pairing_status: String::new(),
             account_message: String::new(),
             account_profile: None,
             account_devices: Vec::new(),
@@ -383,35 +387,72 @@ impl RockCastApp {
         self.pairing_cancel = Some(Arc::clone(&cancel));
         let tx = self.ui_tx.clone();
         let rockserver = self.rockserver.clone();
-        let _ = self.playback.spawn_job(move |_| {
-            let client =
-                crate::session::AccountClient::new(rockserver, crate::session::OsCredentialStore);
-            let deadline = Instant::now() + Duration::from_secs(10 * 60);
-            loop {
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                match client.complete_pairing(&pairing) {
-                    Ok(profile) => {
-                        let _ = tx.send(UiMsg::PairingResult {
-                            request_id: pairing.pairing_request_id.clone(),
-                            result: Ok(profile),
-                        });
-                        return;
+        if self
+            .playback
+            .spawn_job(move |_| {
+                let client = crate::session::AccountClient::new(
+                    rockserver,
+                    crate::session::OsCredentialStore,
+                );
+                let deadline = Instant::now() + Duration::from_secs(10 * 60);
+                loop {
+                    match crate::session::pairing_poll_control(
+                        cancel.load(Ordering::Relaxed),
+                        Instant::now(),
+                        deadline,
+                    ) {
+                        crate::session::PairingPollControl::Continue => {}
+                        crate::session::PairingPollControl::Cancelled => return,
+                        crate::session::PairingPollControl::TimedOut => {
+                            let _ = tx.send(UiMsg::PairingResult {
+                                request_id: pairing.pairing_request_id.clone(),
+                                result: Err(crate::session::PairingPoll::TimedOut),
+                            });
+                            return;
+                        }
                     }
-                    Err(
-                        crate::session::PairingPoll::Pending
-                        | crate::session::PairingPoll::Unavailable,
-                    ) if Instant::now() < deadline => std::thread::sleep(Duration::from_secs(2)),
-                    Err(reason) => {
-                        let _ = tx.send(UiMsg::PairingResult {
-                            request_id: pairing.pairing_request_id.clone(),
-                            result: Err(reason),
-                        });
-                        return;
+                    match client.complete_pairing(&pairing) {
+                        Ok(profile) => {
+                            let _ = tx.send(UiMsg::PairingResult {
+                                request_id: pairing.pairing_request_id.clone(),
+                                result: Ok(profile),
+                            });
+                            return;
+                        }
+                        Err(crate::session::PairingPoll::Pending) => {
+                            std::thread::sleep(Duration::from_secs(2));
+                        }
+                        Err(crate::session::PairingPoll::Unavailable) => {
+                            let _ = tx.send(UiMsg::PairingResult {
+                                request_id: pairing.pairing_request_id.clone(),
+                                result: Err(crate::session::PairingPoll::Unavailable),
+                            });
+                            return;
+                        }
+                        Err(reason) => {
+                            let _ = tx.send(UiMsg::PairingResult {
+                                request_id: pairing.pairing_request_id.clone(),
+                                result: Err(reason),
+                            });
+                            return;
+                        }
                     }
                 }
-            }
-        });
+            })
+            .is_err()
+        {
+            self.pairing_cancel = None;
+            self.pairing_status = "Pairing could not start. Local radio remains available.".into();
+        }
     }
+}
+
+fn default_pairing_device_name() -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "this PC".into());
+    format!("RockCast — {host}")
 }

@@ -317,16 +317,35 @@ impl RockCastApp {
                     self.pairing_cancel = None;
                     match result {
                         Ok(profile) => {
+                            self.pairing_status.clear();
+                            self.account_message = format!(
+                                "This PC is connected to account «{}».",
+                                profile.account_display_name
+                            );
                             self.account_profile = Some(profile);
                             self.pairing = None;
-                            self.account_message = "This PC is connected.".into();
                         }
                         Err(crate::session::PairingPoll::SecureStorageUnavailable) => {
                             self.pairing = None;
+                            self.pairing_status.clear();
                             self.account_message = "Secure credential storage is unavailable. RockCast remains offline.".into();
                         }
-                        Err(_) => {
+                        Err(crate::session::PairingPoll::Unavailable) => {
                             self.pairing = None;
+                            self.pairing_status.clear();
+                            self.account_message = "The account service is unavailable. Pairing stopped; local radio remains available.".into();
+                        }
+                        Err(crate::session::PairingPoll::TimedOut) => {
+                            self.pairing = None;
+                            self.pairing_status.clear();
+                            self.account_message = "Pairing timed out. Start again when you are ready; local radio remains available.".into();
+                        }
+                        Err(
+                            crate::session::PairingPoll::Pending
+                            | crate::session::PairingPoll::Expired,
+                        ) => {
+                            self.pairing = None;
+                            self.pairing_status.clear();
                             self.account_message =
                                 "Pairing expired or was rejected. RockCast remains offline.".into();
                         }

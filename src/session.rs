@@ -29,16 +29,20 @@ impl NativeCredentials {
 
 #[derive(Clone, Deserialize)]
 pub struct PairingRequest {
-    pub pairing_request_id: String,
+    pub(crate) pairing_request_id: String,
     desktop_token: String,
-    pub approval_secret: String,
-    pub short_code: String,
-    pub verification_phrase: String,
+    approval_secret: String,
+    pub(crate) short_code: String,
+    pub(crate) verification_phrase: String,
+    pub(crate) device_display_name: String,
+    pub(crate) device_type: String,
+    pub(crate) expires_at: String,
+    pub(crate) status: String,
 }
 
 impl PairingRequest {
     /// The first-party browser shell consumes both code and one-time approval secret.
-    pub fn deep_link(&self, base_url: &str) -> String {
+    pub(crate) fn deep_link(&self, base_url: &str) -> String {
         format!(
             "{}/?code={}&secret={}",
             base_url.trim_end_matches('/'),
@@ -50,16 +54,20 @@ impl PairingRequest {
 
 #[derive(Clone, Deserialize)]
 pub struct AccountProfile {
-    pub user_id: String,
-    pub session_id: String,
-    pub device_id: String,
+    pub(crate) device_id: String,
+    pub(crate) account_display_name: String,
+    pub(crate) device_display_name: String,
+    pub(crate) device_type: String,
 }
 #[derive(Clone, Deserialize)]
 pub struct Device {
-    pub device_id: String,
-    pub user_id: String,
-    pub name: String,
-    pub platform: String,
+    pub(crate) device_id: String,
+    pub(crate) device_display_name: String,
+    pub(crate) device_type: String,
+    #[serde(default)]
+    pub(crate) created_at: String,
+    #[serde(default)]
+    pub(crate) last_seen_at: Option<String>,
 }
 #[derive(Deserialize)]
 struct DeviceList {
@@ -72,11 +80,12 @@ struct TokenPair {
 }
 #[derive(Deserialize)]
 struct Completion {
-    user_id: String,
     device_id: String,
-    session_id: String,
     access_token: String,
     refresh_token: String,
+    account_display_name: String,
+    device_display_name: String,
+    device_type: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -89,8 +98,30 @@ struct PairingCompletionRequest<'a> {
 pub enum PairingPoll {
     Pending,
     Expired,
+    TimedOut,
     Unavailable,
     SecureStorageUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairingPollControl {
+    Continue,
+    Cancelled,
+    TimedOut,
+}
+
+pub(crate) fn pairing_poll_control(
+    cancelled: bool,
+    now: std::time::Instant,
+    deadline: std::time::Instant,
+) -> PairingPollControl {
+    if cancelled {
+        PairingPollControl::Cancelled
+    } else if now >= deadline {
+        PairingPollControl::TimedOut
+    } else {
+        PairingPollControl::Continue
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -258,8 +289,22 @@ impl<S: CredentialStore> AccountClient<S> {
         }
         response.json().map_err(|_| SessionError::Unavailable)
     }
-    pub(crate) fn create_pairing(&self, device_name: &str) -> Result<PairingRequest, SessionError> {
-        self.json(self.request(reqwest::Method::POST, "/v1/pairing-requests")?.json(&serde_json::json!({"device_name": device_name, "platform": std::env::consts::OS, "app_version": env!("CARGO_PKG_VERSION")})))
+    pub(crate) fn create_pairing(
+        &self,
+        device_display_name: &str,
+    ) -> Result<PairingRequest, SessionError> {
+        let device_display_name = device_display_name.trim();
+        if device_display_name.is_empty() || device_display_name.len() > 128 {
+            return Err(SessionError::Rejected);
+        }
+        self.json(
+            self.request(reqwest::Method::POST, "/v1/pairing-requests")?
+                .json(&serde_json::json!({
+                    "device_display_name": device_display_name,
+                    "device_type": std::env::consts::OS,
+                    "app_version": env!("CARGO_PKG_VERSION")
+                })),
+        )
     }
     pub(crate) fn complete_pairing(
         &self,
@@ -289,9 +334,10 @@ impl<S: CredentialStore> AccountClient<S> {
             .save(&credentials)
             .map_err(|_| PairingPoll::SecureStorageUnavailable)?;
         Ok(AccountProfile {
-            user_id: result.user_id,
             device_id: result.device_id,
-            session_id: result.session_id,
+            account_display_name: result.account_display_name,
+            device_display_name: result.device_display_name,
+            device_type: result.device_type,
         })
     }
     pub(crate) fn refresh(&self) -> Result<(), SessionError> {
@@ -394,6 +440,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pairing_poll_stops_only_for_cancel_or_deadline() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            pairing_poll_control(false, now, now + Duration::from_secs(1)),
+            PairingPollControl::Continue
+        );
+        assert_eq!(
+            pairing_poll_control(true, now, now + Duration::from_secs(1)),
+            PairingPollControl::Cancelled
+        );
+        assert_eq!(
+            pairing_poll_control(false, now + Duration::from_secs(1), now),
+            PairingPollControl::TimedOut
+        );
+    }
+
     fn server(status: u16, body: &'static str) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -433,21 +496,56 @@ mod tests {
     }
 
     #[test]
-    fn create_pairing_uses_contract_without_authorization() {
-        let body = r#"{"pairing_request_id":"request","desktop_token":"aaaaaaaaaaaaaaaa","approval_secret":"bbbbbbbbbbbbbbbb","short_code":"AB12CD34","verification_phrase":"amber dawn"}"#;
+    fn offline_pairing_returns_safe_error_without_credentials() {
+        let client = client("http://127.0.0.1:1".into(), Memory(Mutex::new(None)));
+        assert!(matches!(
+            client.create_pairing("RockCast — offline"),
+            Err(SessionError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn create_pairing_uses_g1_contract_without_authorization() {
+        let body = r#"{"pairing_request_id":"request","desktop_token":"aaaaaaaaaaaaaaaa","approval_secret":"bbbbbbbbbbbbbbbb","short_code":"AB12CD34","verification_phrase":"AMBER-DAWN","device_display_name":"RockCast — test","device_type":"windows","expires_at":"2026-08-28T12:00:00Z","status":"pending"}"#;
         let (url, server) = server(201, body);
         let pairing = client(url, Memory(Mutex::new(None)))
-            .create_pairing("RockCast on test")
+            .create_pairing("RockCast — test")
             .unwrap();
         assert_eq!(pairing.short_code, "AB12CD34");
-        let request = server.join().unwrap().to_ascii_lowercase();
-        assert!(request.starts_with("post /v1/pairing-requests"));
-        assert!(!request.contains("authorization:"));
+        assert_eq!(pairing.device_display_name, "RockCast — test");
+        assert_eq!(pairing.status, "pending");
+        let request = server.join().unwrap();
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.starts_with("post /v1/pairing-requests"));
+        assert!(request.contains(r#""device_display_name":"RockCast — test""#));
+        assert!(request.contains(r#""device_type":"windows""#));
+        assert!(!request_lower.contains("\"device_name\""));
+        assert!(!request_lower.contains("\"platform\""));
+        assert!(!request_lower.contains("authorization:"));
+    }
+
+    #[test]
+    fn pairing_link_is_the_g2_request_specific_browser_context() {
+        let pairing = PairingRequest {
+            pairing_request_id: "request".into(),
+            desktop_token: "desktop-token-1234".into(),
+            approval_secret: "approval-secret-1234".into(),
+            short_code: "AB12CD34".into(),
+            verification_phrase: "AMBER-DAWN".into(),
+            device_display_name: "RockCast — test".into(),
+            device_type: "windows".into(),
+            expires_at: "2026-08-28T12:00:00Z".into(),
+            status: "pending".into(),
+        };
+        assert_eq!(
+            pairing.deep_link("https://alex.vault57.ru/"),
+            "https://alex.vault57.ru/?code=AB12CD34&secret=approval-secret-1234"
+        );
     }
 
     #[test]
     fn completed_pairing_saves_only_to_secure_store_seam() {
-        let body = r#"{"user_id":"user","device_id":"device","session_id":"session","access_token":"aaaaaaaaaaaaaaaa","refresh_token":"bbbbbbbbbbbbbbbb"}"#;
+        let body = r#"{"user_id":"must-not-be-used","device_id":"device","session_id":"session","access_token":"aaaaaaaaaaaaaaaa","refresh_token":"bbbbbbbbbbbbbbbb","account_display_name":"Alex's Rock account","device_display_name":"RockCast — test","device_type":"windows"}"#;
         let (url, server) = server(200, body);
         let store = Memory(Mutex::new(None));
         let pairing = PairingRequest {
@@ -455,11 +553,16 @@ mod tests {
             desktop_token: "desktop-token-1234".into(),
             approval_secret: "never-persist".into(),
             short_code: "AB12CD34".into(),
-            verification_phrase: "amber dawn".into(),
+            verification_phrase: "AMBER-DAWN".into(),
+            device_display_name: "RockCast — test".into(),
+            device_type: "windows".into(),
+            expires_at: "2026-08-28T12:00:00Z".into(),
+            status: "pending".into(),
         };
         let profile = client(url, store).complete_pairing(&pairing).unwrap();
         assert_eq!(profile.device_id, "device");
-        assert_eq!(profile.user_id, "user", "server derives the approved owner");
+        assert_eq!(profile.account_display_name, "Alex's Rock account");
+        assert_eq!(profile.device_display_name, "RockCast — test");
         let request = server.join().unwrap();
         assert!(request.contains("/complete"));
         assert!(request.contains(r#"{"desktop_token":"desktop-token-1234"}"#));
@@ -484,7 +587,11 @@ mod tests {
             desktop_token: "desktop-token-1234".into(),
             approval_secret: "never-persist".into(),
             short_code: "AB12CD34".into(),
-            verification_phrase: "amber dawn".into(),
+            verification_phrase: "AMBER-DAWN".into(),
+            device_display_name: "RockCast — test".into(),
+            device_type: "windows".into(),
+            expires_at: "2026-08-28T12:00:00Z".into(),
+            status: "pending".into(),
         };
         assert!(matches!(
             client(url, Memory(Mutex::new(None))).complete_pairing(&pairing),

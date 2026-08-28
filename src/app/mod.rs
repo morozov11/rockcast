@@ -411,8 +411,18 @@ impl RockCastApp {
                             return;
                         }
                     }
-                    match client.complete_pairing(&pairing) {
-                        Ok(profile) => {
+                    match client.complete_pairing_result(&pairing) {
+                        Ok((profile, credentials)) => {
+                            if cancel.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            if let Err(reason) = client.save_pairing_credentials(&credentials) {
+                                let _ = tx.send(UiMsg::PairingResult {
+                                    request_id: pairing.pairing_request_id.clone(),
+                                    result: Err(reason),
+                                });
+                                return;
+                            }
                             let _ = tx.send(UiMsg::PairingResult {
                                 request_id: pairing.pairing_request_id.clone(),
                                 result: Ok(profile),

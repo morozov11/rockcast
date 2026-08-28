@@ -98,6 +98,8 @@ struct PairingCompletionRequest<'a> {
 pub enum PairingPoll {
     Pending,
     Expired,
+    DeviceLimit,
+    Rejected,
     TimedOut,
     Unavailable,
     SecureStorageUnavailable,
@@ -306,10 +308,10 @@ impl<S: CredentialStore> AccountClient<S> {
                 })),
         )
     }
-    pub(crate) fn complete_pairing(
+    pub(crate) fn complete_pairing_result(
         &self,
         pairing: &PairingRequest,
-    ) -> Result<AccountProfile, PairingPoll> {
+    ) -> Result<(AccountProfile, NativeCredentials), PairingPoll> {
         let request = self
             .request(
                 reqwest::Method::POST,
@@ -319,26 +321,53 @@ impl<S: CredentialStore> AccountClient<S> {
                 ),
             )
             .map_err(|_| PairingPoll::Unavailable)?;
-        let result: Result<Completion, SessionError> =
-            self.json(request.json(&PairingCompletionRequest {
+        let response = request
+            .json(&PairingCompletionRequest {
                 desktop_token: &pairing.desktop_token,
-            }));
-        let result = result.map_err(|e| match e {
-            SessionError::Rejected => PairingPoll::Pending,
-            SessionError::Unavailable => PairingPoll::Unavailable,
-            SessionError::SecureStorageUnavailable => PairingPoll::SecureStorageUnavailable,
-        })?;
+            })
+            .send()
+            .map_err(|_| PairingPoll::Unavailable)?;
+        let status = response.status();
+        if status.as_u16() == 202 {
+            return Err(PairingPoll::Pending);
+        }
+        if status.as_u16() == 409 {
+            return Err(PairingPoll::DeviceLimit);
+        }
+        if status.as_u16() == 410 {
+            return Err(PairingPoll::Expired);
+        }
+        if status.as_u16() == 401 {
+            return Err(PairingPoll::Rejected);
+        }
+        if !status.is_success() {
+            return Err(if status.is_server_error() {
+                PairingPoll::Unavailable
+            } else {
+                PairingPoll::Rejected
+            });
+        }
+        let result: Completion = response.json().map_err(|_| PairingPoll::Unavailable)?;
         let credentials = NativeCredentials::new(result.access_token, result.refresh_token)
             .map_err(|_| PairingPoll::Expired)?;
+        Ok((
+            AccountProfile {
+                device_id: result.device_id,
+                account_display_name: result.account_display_name,
+                device_display_name: result.device_display_name,
+                device_type: result.device_type,
+            },
+            credentials,
+        ))
+    }
+
+    pub(crate) fn save_pairing_credentials(
+        &self,
+        credentials: &NativeCredentials,
+    ) -> Result<(), PairingPoll> {
         self.store
-            .save(&credentials)
-            .map_err(|_| PairingPoll::SecureStorageUnavailable)?;
-        Ok(AccountProfile {
-            device_id: result.device_id,
-            account_display_name: result.account_display_name,
-            device_display_name: result.device_display_name,
-            device_type: result.device_type,
-        })
+            .save(credentials)
+            .map_err(|_| PairingPoll::SecureStorageUnavailable)
     }
     pub(crate) fn refresh(&self) -> Result<(), SessionError> {
         let old = self.store.load()?.ok_or(SessionError::Rejected)?;
@@ -559,7 +588,11 @@ mod tests {
             expires_at: "2026-08-28T12:00:00Z".into(),
             status: "pending".into(),
         };
-        let profile = client(url, store).complete_pairing(&pairing).unwrap();
+        let account_client = client(url, store);
+        let (profile, credentials) = account_client.complete_pairing_result(&pairing).unwrap();
+        account_client
+            .save_pairing_credentials(&credentials)
+            .unwrap();
         assert_eq!(profile.device_id, "device");
         assert_eq!(profile.account_display_name, "Alex's Rock account");
         assert_eq!(profile.device_display_name, "RockCast — test");
@@ -581,7 +614,7 @@ mod tests {
 
     #[test]
     fn pairing_poll_waits_for_browser_approval() {
-        let (url, server) = server(401, "{}");
+        let (url, server) = server(202, "{}");
         let pairing = PairingRequest {
             pairing_request_id: "request".into(),
             desktop_token: "desktop-token-1234".into(),
@@ -594,10 +627,37 @@ mod tests {
             status: "pending".into(),
         };
         assert!(matches!(
-            client(url, Memory(Mutex::new(None))).complete_pairing(&pairing),
+            client(url, Memory(Mutex::new(None))).complete_pairing_result(&pairing),
             Err(PairingPoll::Pending)
         ));
         assert!(server.join().unwrap().contains("/complete"));
+    }
+
+    #[test]
+    fn pairing_poll_maps_terminal_server_states() {
+        for (status, expected) in [
+            (409, PairingPoll::DeviceLimit),
+            (410, PairingPoll::Expired),
+            (401, PairingPoll::Rejected),
+        ] {
+            let (url, server) = server(status, "{}");
+            let pairing = PairingRequest {
+                pairing_request_id: "request".into(),
+                desktop_token: "desktop-token-1234".into(),
+                approval_secret: "never-persist".into(),
+                short_code: "AB12CD34".into(),
+                verification_phrase: "AMBER-DAWN".into(),
+                device_display_name: "RockCast — test".into(),
+                device_type: "windows".into(),
+                expires_at: "2026-08-28T12:00:00Z".into(),
+                status: "pending".into(),
+            };
+            assert!(matches!(
+                client(url, Memory(Mutex::new(None))).complete_pairing_result(&pairing),
+                Err(actual) if actual == expected
+            ));
+            assert!(server.join().unwrap().contains("/complete"));
+        }
     }
 
     #[test]

@@ -118,6 +118,8 @@ impl LocalPlayer {
         *self.levels.lock() = [0.08; BANDS];
     }
 
+    /// Starts local playback and reports status and successful start through the supplied callbacks.
+    #[allow(clippy::too_many_arguments)]
     pub fn play(
         &self,
         device: &LocalDeviceInfo,

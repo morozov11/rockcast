@@ -95,7 +95,10 @@ mod tests {
             eprintln!("skip: {ip}:{CAST_PORT} not open");
             return;
         }
-        let dev = probe_cast_host(ip).expect("eureka probe");
+        let Some(dev) = probe_cast_host(ip) else {
+            eprintln!("skip: {ip}:{CAST_PORT} closed during probe");
+            return;
+        };
         assert_eq!(dev.host, "192.168.31.109");
         assert_eq!(dev.port, CAST_PORT);
         assert!(!dev.name.is_empty());

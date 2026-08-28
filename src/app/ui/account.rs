@@ -3,6 +3,15 @@ use crate::session::{AccountClient, OsCredentialStore};
 use eframe::egui::{self, Context, RichText};
 
 impl RockCastApp {
+    fn cancel_pairing(&mut self) {
+        if let Some(cancel) = &self.pairing_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.pairing = None;
+        self.pairing_cancel = None;
+        self.pairing_status.clear();
+    }
+
     fn account_client(&self) -> AccountClient<OsCredentialStore> {
         AccountClient::new(self.rockserver.clone(), OsCredentialStore)
     }
@@ -75,12 +84,7 @@ impl RockCastApp {
                     }
                     ui.small("The QR and link belong to this one pairing request. Secrets stay in memory and are never shown or saved.");
                     if ui.button("Cancel connection").clicked() {
-                        if let Some(cancel) = &self.pairing_cancel {
-                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        self.pairing = None;
-                        self.pairing_cancel = None;
-                        self.pairing_status.clear();
+                        self.cancel_pairing();
                         self.account_message = "Connection cancelled. Local radio remains available.".into();
                     }
                 }
@@ -157,6 +161,9 @@ impl RockCastApp {
                     ui.label(&self.account_message);
                 }
             });
+        if self.account_open && !open && self.pairing.is_some() {
+            self.cancel_pairing();
+        }
         self.account_open = open;
     }
 }

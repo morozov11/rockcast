@@ -349,6 +349,16 @@ impl RockCastApp {
                             self.account_message =
                                 "Pairing expired or was rejected. RockCast remains offline.".into();
                         }
+                        Err(crate::session::PairingPoll::DeviceLimit) => {
+                            self.pairing = None;
+                            self.pairing_status.clear();
+                            self.account_message = "This account has reached its active-device limit. Revoke an old device and try again.".into();
+                        }
+                        Err(crate::session::PairingPoll::Rejected) => {
+                            self.pairing = None;
+                            self.pairing_status.clear();
+                            self.account_message = "Pairing was rejected or is no longer valid. RockCast remains offline.".into();
+                        }
                     }
                 }
             }

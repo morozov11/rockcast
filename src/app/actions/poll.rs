@@ -306,59 +306,93 @@ impl RockCastApp {
                         }
                     }
                 }
+                UiMsg::PairingStarted { name, result } => match result {
+                    Ok(request) => {
+                        self.account_state = super::super::AccountUiState::Waiting {
+                            request,
+                            status: "Waiting for browser approval…".into(),
+                        }
+                    }
+                    Err(_) => {
+                        self.account_state = super::super::AccountUiState::Disconnected {
+                            device_name: name,
+                            message: Some(
+                                "Could not start account connection. Local radio is unchanged."
+                                    .into(),
+                            ),
+                        }
+                    }
+                },
+                UiMsg::AccountLoaded(result) => {
+                    self.account_refreshing = false;
+                    let cached = match &self.account_state {
+                        super::super::AccountUiState::Connected { context, .. }
+                        | super::super::AccountUiState::ConnectedFirstTime { context } => {
+                            Some(context.clone())
+                        }
+                        super::super::AccountUiState::Error { cached, .. } => cached.clone(),
+                        _ => None,
+                    };
+                    self.account_state = match result {
+                        Ok(Some((profile, devices))) => super::super::AccountUiState::Connected {
+                            context: super::super::AccountContext { profile, devices },
+                            banner: None,
+                        },
+                        Ok(None) => super::super::AccountUiState::Disconnected {
+                            device_name: super::super::default_pairing_device_name(),
+                            message: None,
+                        },
+                        Err(crate::session::SessionError::Unauthorized) => {
+                            super::super::AccountUiState::Error {
+                                kind: super::super::AccountErrorKind::AuthRequired,
+                                cached: None,
+                            }
+                        }
+                        Err(crate::session::SessionError::SecureStorageUnavailable) => {
+                            super::super::AccountUiState::Error {
+                                kind: super::super::AccountErrorKind::SecureStorage,
+                                cached: None,
+                            }
+                        }
+                        Err(_) => match cached {
+                            Some(context) => super::super::AccountUiState::Connected {
+                                context,
+                                banner: Some(
+                                    "Account service is temporarily unavailable. Try again later."
+                                        .into(),
+                                ),
+                            },
+                            None => super::super::AccountUiState::Error {
+                                kind: super::super::AccountErrorKind::Recoverable,
+                                cached: None,
+                            },
+                        },
+                    };
+                }
                 UiMsg::PairingResult { request_id, result } => {
-                    if self
-                        .pairing
-                        .as_ref()
-                        .is_none_or(|pairing| pairing.pairing_request_id != request_id)
-                    {
+                    let super::super::AccountUiState::Waiting {
+                        request: pairing, ..
+                    } = &self.account_state
+                    else {
+                        continue;
+                    };
+                    if pairing.pairing_request_id != request_id {
                         continue;
                     }
                     self.pairing_cancel = None;
                     match result {
                         Ok(profile) => {
-                            self.pairing_status.clear();
-                            self.account_message = format!(
-                                "This PC is connected to account «{}».",
-                                profile.account_display_name
-                            );
-                            self.account_profile = Some(profile);
-                            self.pairing = None;
+                            self.account_state = super::super::AccountUiState::ConnectedFirstTime {
+                                context: super::super::AccountContext { profile, devices: Vec::new() },
+                            };
                         }
                         Err(crate::session::PairingPoll::SecureStorageUnavailable) => {
-                            self.pairing = None;
-                            self.pairing_status.clear();
-                            self.account_message = "Secure credential storage is unavailable. RockCast remains offline.".into();
+                            self.account_state = super::super::AccountUiState::Error { kind: super::super::AccountErrorKind::SecureStorage, cached: None };
                         }
                         Err(crate::session::PairingPoll::Unavailable) => {
-                            self.pairing = None;
-                            self.pairing_status.clear();
-                            self.account_message = "The account service is unavailable. Pairing stopped; local radio remains available.".into();
+                            self.account_state = super::super::AccountUiState::Error { kind: super::super::AccountErrorKind::Recoverable, cached: None };
                         }
-                        Err(crate::session::PairingPoll::TimedOut) => {
-                            self.pairing = None;
-                            self.pairing_status.clear();
-                            self.account_message = "Pairing timed out. Start again when you are ready; local radio remains available.".into();
-                        }
-                        Err(
-                            crate::session::PairingPoll::Pending
-                            | crate::session::PairingPoll::Expired,
-                        ) => {
-                            self.pairing = None;
-                            self.pairing_status.clear();
-                            self.account_message =
-                                "Pairing expired or was rejected. RockCast remains offline.".into();
-                        }
-                        Err(crate::session::PairingPoll::DeviceLimit) => {
-                            self.pairing = None;
-                            self.pairing_status.clear();
-                            self.account_message = "This account has reached its active-device limit. Revoke an old device and try again.".into();
-                        }
-                        Err(crate::session::PairingPoll::Rejected) => {
-                            self.pairing = None;
-                            self.pairing_status.clear();
-                            self.account_message = "Pairing was rejected or is no longer valid. RockCast remains offline.".into();
-                        }
+                        Err(_) => self.account_state = super::super::AccountUiState::Disconnected { device_name: super::super::default_pairing_device_name(), message: Some("Connection request expired or was rejected. Local radio remains available.".into()) },
                     }
                 }
             }

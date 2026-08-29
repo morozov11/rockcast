@@ -20,6 +20,16 @@ pub(crate) enum UiMsg {
         request_id: String,
         result: Result<crate::session::AccountProfile, crate::session::PairingPoll>,
     },
+    PairingStarted {
+        name: String,
+        result: Result<crate::session::PairingRequest, crate::session::SessionError>,
+    },
+    AccountLoaded(
+        Result<
+            Option<(crate::session::AccountProfile, Vec<crate::session::Device>)>,
+            crate::session::SessionError,
+        >,
+    ),
 }
 
 pub(super) fn same_output_device(left: &OutputDevice, right: &OutputDevice) -> bool {

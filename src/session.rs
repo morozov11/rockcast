@@ -28,6 +28,7 @@ impl NativeCredentials {
 }
 
 #[derive(Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct PairingRequest {
     pub(crate) pairing_request_id: String,
     desktop_token: String,
@@ -53,6 +54,7 @@ impl PairingRequest {
 }
 
 #[derive(Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct AccountProfile {
     pub(crate) device_id: String,
     pub(crate) account_display_name: String,
@@ -60,6 +62,7 @@ pub struct AccountProfile {
     pub(crate) device_type: String,
 }
 #[derive(Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct Device {
     pub(crate) device_id: String,
     pub(crate) device_display_name: String,
@@ -132,6 +135,8 @@ pub enum SessionError {
     Unavailable,
     #[error("The account request was rejected or has expired.")]
     Rejected,
+    #[error("The account session is no longer authorized.")]
+    Unauthorized,
     #[error("Secure credential storage is unavailable; RockCast remains offline.")]
     SecureStorageUnavailable,
 }
@@ -283,6 +288,9 @@ impl<S: CredentialStore> AccountClient<S> {
     ) -> Result<T, SessionError> {
         let response = request.send().map_err(|_| SessionError::Unavailable)?;
         if !response.status().is_success() {
+            if response.status().as_u16() == 401 {
+                return Err(SessionError::Unauthorized);
+            }
             return Err(if response.status().is_server_error() {
                 SessionError::Unavailable
             } else {
@@ -371,20 +379,28 @@ impl<S: CredentialStore> AccountClient<S> {
     }
     pub(crate) fn refresh(&self) -> Result<(), SessionError> {
         let old = self.store.load()?.ok_or(SessionError::Rejected)?;
-        let pair: Result<TokenPair, SessionError> = self.json(
-            self.request(reqwest::Method::POST, "/v1/auth/refresh")?
-                .json(&serde_json::json!({"refresh_token": old.refresh_token()})),
-        );
-        match pair
-            .and_then(|pair| NativeCredentials::new(pair.access_token, pair.refresh_token))
-            .and_then(|new| self.store.save(&new))
-        {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = self.store.clear();
-                Err(e)
-            }
+        let response = self
+            .request(reqwest::Method::POST, "/v1/auth/refresh")?
+            .json(&serde_json::json!({"refresh_token": old.refresh_token()}))
+            .send()
+            .map_err(|_| SessionError::Unavailable)?;
+        if response.status().as_u16() == 401 {
+            let _ = self.store.clear();
+            return Err(SessionError::Unauthorized);
         }
+        if !response.status().is_success() {
+            return Err(if response.status().is_server_error() {
+                SessionError::Unavailable
+            } else {
+                SessionError::Rejected
+            });
+        }
+        let pair: TokenPair = response.json().map_err(|_| SessionError::Unavailable)?;
+        NativeCredentials::new(pair.access_token, pair.refresh_token)
+            .and_then(|new| self.store.save(&new))
+    }
+    pub(crate) fn has_credentials(&self) -> Result<bool, SessionError> {
+        Ok(self.store.load()?.is_some())
     }
     fn authorized(
         &self,
@@ -397,13 +413,20 @@ impl<S: CredentialStore> AccountClient<S> {
             .bearer_auth(credentials.access_token()))
     }
     pub(crate) fn profile(&self) -> Result<AccountProfile, SessionError> {
-        self.json(self.authorized(reqwest::Method::GET, "/v1/account/profile")?)
+        let result = self.json(self.authorized(reqwest::Method::GET, "/v1/account/profile")?);
+        if matches!(&result, Err(SessionError::Unauthorized)) {
+            let _ = self.store.clear();
+        }
+        result
     }
     pub(crate) fn devices(&self) -> Result<Vec<Device>, SessionError> {
-        Ok(self
-            .json::<DeviceList>(self.authorized(reqwest::Method::GET, "/v1/devices")?)?
-            .devices)
+        let result = self.json::<DeviceList>(self.authorized(reqwest::Method::GET, "/v1/devices")?);
+        if matches!(&result, Err(SessionError::Unauthorized)) {
+            let _ = self.store.clear();
+        }
+        result.map(|list| list.devices)
     }
+    #[allow(dead_code)]
     pub(crate) fn revoke_device(&self, device_id: &str) -> Result<(), SessionError> {
         let r = self
             .authorized(reqwest::Method::DELETE, &format!("/v1/devices/{device_id}"))?
@@ -661,14 +684,26 @@ mod tests {
     }
 
     #[test]
-    fn expiry_and_refresh_replay_clear_local_credentials() {
+    fn refresh_401_clears_local_credentials() {
         let (url, server) = server(401, "{}");
         let store = Memory(Mutex::new(Some(
             NativeCredentials::new("a".repeat(16), "b".repeat(16)).unwrap(),
         )));
         let client = client(url, store);
-        assert_eq!(client.refresh().unwrap_err(), SessionError::Rejected);
+        assert_eq!(client.refresh().unwrap_err(), SessionError::Unauthorized);
         assert!(client.store.load().unwrap().is_none());
+        assert!(server.join().unwrap().contains("/v1/auth/refresh"));
+    }
+
+    #[test]
+    fn refresh_5xx_keeps_local_credentials() {
+        let (url, server) = server(500, "{}");
+        let store = Memory(Mutex::new(Some(
+            NativeCredentials::new("a".repeat(16), "b".repeat(16)).unwrap(),
+        )));
+        let client = client(url, store);
+        assert_eq!(client.refresh().unwrap_err(), SessionError::Unavailable);
+        assert!(client.store.load().unwrap().is_some());
         assert!(server.join().unwrap().contains("/v1/auth/refresh"));
     }
 

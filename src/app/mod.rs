@@ -32,6 +32,45 @@ use crate::{
 use messages::UiMsg;
 use theme::{ACCENT, BG, EQ_REPAINT_INTERVAL, FG, MUTED, PANEL, PANEL_2, UI_SLOW_REPAINT_INTERVAL};
 
+#[derive(Clone)]
+pub(super) struct AccountContext {
+    pub(super) profile: crate::session::AccountProfile,
+    pub(super) devices: Vec<crate::session::Device>,
+}
+
+pub(super) enum AccountUiState {
+    Disconnected {
+        device_name: String,
+        message: Option<String>,
+    },
+    Starting {
+        device_name: String,
+        loading_account: bool,
+    },
+    Waiting {
+        request: crate::session::PairingRequest,
+        status: String,
+    },
+    ConnectedFirstTime {
+        context: AccountContext,
+    },
+    Connected {
+        context: AccountContext,
+        banner: Option<String>,
+    },
+    Error {
+        kind: AccountErrorKind,
+        cached: Option<AccountContext>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum AccountErrorKind {
+    AuthRequired,
+    Recoverable,
+    SecureStorage,
+}
+
 pub struct RockCastApp {
     pub(super) playback: PlaybackController,
     pub(super) stations: Vec<Station>,
@@ -49,13 +88,10 @@ pub struct RockCastApp {
     pub(super) favourites_open: bool,
     pub(super) history_open: bool,
     pub(super) account_open: bool,
-    pub(super) pairing: Option<crate::session::PairingRequest>,
     pub(super) pairing_cancel: Option<Arc<AtomicBool>>,
-    pub(super) pairing_device_name: String,
-    pub(super) pairing_status: String,
-    pub(super) account_message: String,
-    pub(super) account_profile: Option<crate::session::AccountProfile>,
-    pub(super) account_devices: Vec<crate::session::Device>,
+    pub(super) account_state: AccountUiState,
+    pub(super) account_load_started: bool,
+    pub(super) account_refreshing: bool,
     pub(super) track: String,
     pub(super) volume: u8,
     pub(super) loading_stations: bool,
@@ -125,7 +161,7 @@ impl RockCastApp {
         let cast_relay = settings.cast_relay;
         let lang = settings.language;
         let rockserver = RuntimeConfig::for_app();
-        log::info!("RockServer base URL: {}", rockserver.base_url());
+        log::info!("RockServer configuration loaded");
         let last_played_station = settings.last_played_station.clone();
         let t = lang.t();
 
@@ -148,13 +184,13 @@ impl RockCastApp {
             favourites_open: false,
             history_open: false,
             account_open: false,
-            pairing: None,
             pairing_cancel: None,
-            pairing_device_name: default_pairing_device_name(),
-            pairing_status: String::new(),
-            account_message: String::new(),
-            account_profile: None,
-            account_devices: Vec::new(),
+            account_state: AccountUiState::Disconnected {
+                device_name: default_pairing_device_name(),
+                message: None,
+            },
+            account_load_started: false,
+            account_refreshing: false,
             track: t.track_hint.into(),
             volume,
             loading_stations: false,
@@ -377,9 +413,13 @@ impl Drop for RockCastApp {
 
 impl RockCastApp {
     fn poll_pairing(&mut self) {
-        let Some(pairing) = self.pairing.clone() else {
+        let AccountUiState::Waiting {
+            request: pairing, ..
+        } = &self.account_state
+        else {
             return;
         };
+        let pairing = pairing.clone();
         if self.pairing_cancel.is_some() {
             return;
         }
@@ -452,17 +492,19 @@ impl RockCastApp {
             .is_err()
         {
             self.pairing_cancel = None;
-            self.pairing_status = "Pairing could not start. Local radio remains available.".into();
+            self.account_state = AccountUiState::Error {
+                kind: AccountErrorKind::Recoverable,
+                cached: None,
+            };
         }
     }
 }
 
 fn default_pairing_device_name() -> String {
-    let host = std::env::var("COMPUTERNAME")
+    std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "this PC".into());
-    format!("RockCast — {host}")
+        .unwrap_or_else(|| "This PC".into())
 }

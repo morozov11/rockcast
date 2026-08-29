@@ -70,6 +70,11 @@ pub struct Strings {
     pub cast_relay_note: &'static str,
     pub cast_relay_restart_on: &'static str,
     pub cast_relay_restart_off: &'static str,
+    pub account_title: &'static str,
+    pub account_offline_note: &'static str,
+    pub account_connect_title: &'static str,
+    pub account_connect: &'static str,
+    pub account_starting: &'static str,
 }
 
 pub static RU: Strings = Strings {
@@ -116,6 +121,11 @@ pub static RU: Strings = Strings {
     cast_relay_note: "ПК -> колонка по Wi‑Fi (если станции нужны через VPN)",
     cast_relay_restart_on: "Включаю трансляцию через ПК…",
     cast_relay_restart_off: "Прямой Cast без ретранслятора…",
+    account_title: "Аккаунт и устройства",
+    account_offline_note: "Локальное радио продолжает работать без аккаунта.",
+    account_connect_title: "Подключите этот ПК к аккаунту",
+    account_connect: "Подключить этот ПК",
+    account_starting: "Создаю запрос на подключение…",
 };
 
 pub static EN: Strings = Strings {
@@ -162,6 +172,11 @@ pub static EN: Strings = Strings {
     cast_relay_note: "PC -> speaker on Wi-Fi (when stations need VPN)",
     cast_relay_restart_on: "Switching to Via PC relay…",
     cast_relay_restart_off: "Switching to direct Cast…",
+    account_title: "Account & devices",
+    account_offline_note: "Local radio continues to work without an account.",
+    account_connect_title: "Connect this PC to an account",
+    account_connect: "Connect this PC",
+    account_starting: "Creating connection request…",
 };
 
 /// Simple `{}` placeholder replace (one or more, left-to-right).

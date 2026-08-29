@@ -1,5 +1,26 @@
 # RockCast status
 
+## RM-011 Wave 4 — C4–C8 account UX (complete, 2026-08-29)
+
+The Account & devices dialog now renders one localized state at a time in both
+Russian and English. The browser-approval screen explains the next steps,
+shows an expiry countdown, and provides a primary secure-link action plus a
+copy warning. Its QR is rendered with error correction M, a four-module quiet
+zone, and integer-size modules in a 256–320 logical-pixel target; the link and
+QR payload are never logged or shown as text.
+
+Successful pairing moves atomically to a dedicated success screen, whose
+primary action opens devices and whose secondary action closes the dialog.
+The connected centre keeps the current PC first, gives it only local logout,
+and offers confirmed disconnect only for other devices. It distinguishes an
+empty list from an unavailable list, formats dates for the selected language,
+and never renders identifiers, sessions, proofs, or tokens. Closing or
+cancelling the waiting screen stops the local polling job; no server cancel
+endpoint was added.
+
+Local verification: `cargo fmt --check`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo test`, and `git diff --check`.
+
 ## RM-011-G4 — clear PC connection UX (complete, 2026-08-28)
 
 The Account & devices dialog now connects the current PC to an existing Rock account instead of

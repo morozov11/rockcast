@@ -1,5 +1,19 @@
 # RockCast tasks
 
+## RM-011 Wave 4 — C4–C8 account UX (complete, 2026-08-29)
+
+- [x] Provide localized browser-approval steps, parsed-expiry countdown, secure-link open/copy
+      actions, and a no-share copy warning; cancel/close stops only the local polling job.
+- [x] Render a 256–320 logical-pixel QR with M correction, four quiet-zone modules, and integer
+      module scale without logging or displaying the link payload.
+- [x] Transition pairing success atomically to its own screen with primary device-centre and
+      secondary done actions.
+- [x] Keep the current PC first in the account centre; use local logout for it and confirmed
+      remote disconnect only for other devices, with localized dates and distinct empty/unavailable
+      device-list states.
+- [x] Localize all account UI through `i18n::Strings` and `Lang`; account paths emit no URL,
+      query, QR payload, short code, phrase, proof, token, or account/device identifier diagnostics.
+
 ## RM-011-G4 — clear PC connection UX (complete, 2026-08-28)
 
 - [x] Call the action “Connect this PC to an account”; pair with a user-editable,

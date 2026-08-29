@@ -308,18 +308,16 @@ impl RockCastApp {
                 }
                 UiMsg::PairingStarted { name, result } => match result {
                     Ok(request) => {
+                        self.pairing_link_copied = false;
                         self.account_state = super::super::AccountUiState::Waiting {
                             request,
-                            status: "Waiting for browser approval…".into(),
+                            status: self.lang.t().account_waiting_title.into(),
                         }
                     }
                     Err(_) => {
                         self.account_state = super::super::AccountUiState::Disconnected {
                             device_name: name,
-                            message: Some(
-                                "Could not start account connection. Local radio is unchanged."
-                                    .into(),
-                            ),
+                            message: Some(self.lang.t().account_connection_failed.into()),
                         }
                     }
                 },
@@ -357,10 +355,7 @@ impl RockCastApp {
                         Err(_) => match cached {
                             Some(context) => super::super::AccountUiState::Connected {
                                 context,
-                                banner: Some(
-                                    "Account service is temporarily unavailable. Try again later."
-                                        .into(),
-                                ),
+                                banner: Some(self.lang.t().account_unavailable.into()),
                             },
                             None => super::super::AccountUiState::Error {
                                 kind: super::super::AccountErrorKind::Recoverable,
@@ -383,16 +378,30 @@ impl RockCastApp {
                     match result {
                         Ok(profile) => {
                             self.account_state = super::super::AccountUiState::ConnectedFirstTime {
-                                context: super::super::AccountContext { profile, devices: Vec::new() },
+                                context: super::super::AccountContext {
+                                    profile,
+                                    devices: Vec::new(),
+                                },
                             };
                         }
                         Err(crate::session::PairingPoll::SecureStorageUnavailable) => {
-                            self.account_state = super::super::AccountUiState::Error { kind: super::super::AccountErrorKind::SecureStorage, cached: None };
+                            self.account_state = super::super::AccountUiState::Error {
+                                kind: super::super::AccountErrorKind::SecureStorage,
+                                cached: None,
+                            };
                         }
                         Err(crate::session::PairingPoll::Unavailable) => {
-                            self.account_state = super::super::AccountUiState::Error { kind: super::super::AccountErrorKind::Recoverable, cached: None };
+                            self.account_state = super::super::AccountUiState::Error {
+                                kind: super::super::AccountErrorKind::Recoverable,
+                                cached: None,
+                            };
                         }
-                        Err(_) => self.account_state = super::super::AccountUiState::Disconnected { device_name: super::super::default_pairing_device_name(), message: Some("Connection request expired or was rejected. Local radio remains available.".into()) },
+                        Err(_) => {
+                            self.account_state = super::super::AccountUiState::Disconnected {
+                                device_name: super::super::default_pairing_device_name(),
+                                message: Some(self.lang.t().account_terminal_error.into()),
+                            }
+                        }
                     }
                 }
             }

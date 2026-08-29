@@ -1,5 +1,17 @@
 # RockCast status
 
+## RM-011-09 — Wave 9 A4 secure pairing handoff (complete locally, 2026-08-29)
+
+RockCast now constructs its QR, copy and open-link payload through the existing `PairingRequest`
+helper as `?code=<code>#secret=<proof>`. The one-time approval secret remains only in process
+memory, is never shown as text or logged, and is no longer in the URL query. A deterministic unit
+test locks the exact fragment shape.
+
+Local checks passed: `cargo fmt --check`, strict `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo test` (93 unit tests; live-network tests intentionally ignored), and final
+`git diff --check`. No server/API/OpenAPI change, push, deploy, staging mutation or real pairing
+flow occurred.
+
 ## RM-011 Wave 4 — C4–C8 account UX (complete, 2026-08-29)
 
 The Account & devices dialog now renders one localized state at a time in both

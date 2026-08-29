@@ -1,5 +1,13 @@
 # RockCast tasks
 
+## RM-011 Wave 9 — A4 secure pairing handoff (complete, 2026-08-29)
+
+- [x] Generate all existing QR/open/copy handoffs through the shared fragment-based link helper.
+- [x] Keep the approval secret out of query URLs, UI text and diagnostics; retain it in memory
+      only until normal pairing completion/cancellation.
+- [x] Add a deterministic exact-shape test and pass Rust formatting, strict Clippy and tests.
+- [ ] Production App Link association remains external to RockCast and was not deployed or claimed.
+
 ## RM-011 Wave 4 — C4–C8 account UX (complete, 2026-08-29)
 
 - [x] Provide localized browser-approval steps, parsed-expiry countdown, secure-link open/copy

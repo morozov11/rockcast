@@ -42,10 +42,10 @@ pub struct PairingRequest {
 }
 
 impl PairingRequest {
-    /// The first-party browser shell consumes both code and one-time approval secret.
+    /// Builds the first-party browser handoff with the approval secret in the URL fragment.
     pub(crate) fn deep_link(&self, base_url: &str) -> String {
         format!(
-            "{}/?code={}&secret={}",
+            "{}/?code={}#secret={}",
             base_url.trim_end_matches('/'),
             self.short_code,
             self.approval_secret
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn pairing_link_is_the_g2_request_specific_browser_context() {
+    fn pairing_link_keeps_the_approval_secret_out_of_the_query() {
         let pairing = PairingRequest {
             pairing_request_id: "request".into(),
             desktop_token: "desktop-token-1234".into(),
@@ -591,7 +591,7 @@ mod tests {
         };
         assert_eq!(
             pairing.deep_link("https://alex.vault57.ru/"),
-            "https://alex.vault57.ru/?code=AB12CD34&secret=approval-secret-1234"
+            "https://alex.vault57.ru/?code=AB12CD34#secret=approval-secret-1234"
         );
     }
 

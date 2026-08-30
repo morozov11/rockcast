@@ -1,5 +1,15 @@
 # RockCast status
 
+## RM-011 device-secret native sessions (implemented locally, 2026-08-30)
+
+RockCast now treats pairing as a durable device binding. The DPAPI-protected credential contains a
+`device_id`, a persistent `device_secret`, and a replaceable access token. On an expired access
+token it calls `POST /v1/auth/device-session`; network and server failures keep the binding, while
+only `401 device_credential_invalid` clears it. The legacy refresh-token endpoint and rotating
+refresh-token recovery path are no longer used by this client. This requires the corresponding
+RockServer API change before end-to-end use. Verified: `cargo fmt --check`, strict Clippy, and
+`cargo test` (94 unit tests plus non-live integration coverage) passed.
+
 ## RM-011-09 — Wave 9 A4 secure pairing handoff (complete locally, 2026-08-29)
 
 RockCast now constructs its QR, copy and open-link payload through the existing `PairingRequest`

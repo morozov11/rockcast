@@ -66,7 +66,6 @@ pub(super) enum AccountUiState {
 
 #[derive(Clone, Copy)]
 pub(super) enum AccountErrorKind {
-    AuthRequired,
     Recoverable,
     SecureStorage,
 }
@@ -490,7 +489,9 @@ impl RockCastApp {
                                 log::error!("pairing credentials were not persisted locally");
                                 let _ = tx.send(UiMsg::PairingResult {
                                     request_id: pairing.pairing_request_id.clone(),
-                                    result: Err(crate::session::PairingPoll::SecureStorageUnavailable),
+                                    result: Err(
+                                        crate::session::PairingPoll::SecureStorageUnavailable,
+                                    ),
                                 });
                                 return;
                             }

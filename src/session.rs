@@ -1,29 +1,41 @@
 //! Native account session client. Tokens never implement `Debug` or persistence formats.
 use crate::{rockserver::RuntimeConfig, settings};
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::PathBuf, time::Duration};
+use std::{fs, io, path::PathBuf, sync::Mutex, time::Duration};
+
+/// Serializes access-token issuance within one RockCast process.
+static SESSION_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct NativeCredentials {
+    device_id: String,
+    device_secret: String,
     access_token: String,
-    refresh_token: String,
 }
 
 impl NativeCredentials {
-    fn new(access_token: String, refresh_token: String) -> Result<Self, SessionError> {
-        if access_token.len() < 16 || refresh_token.len() < 16 {
+    fn new(
+        device_id: String,
+        device_secret: String,
+        access_token: String,
+    ) -> Result<Self, SessionError> {
+        if device_id.is_empty() || device_secret.len() < 32 || access_token.len() < 16 {
             return Err(SessionError::Rejected);
         }
         Ok(Self {
+            device_id,
+            device_secret,
             access_token,
-            refresh_token,
         })
     }
     pub(crate) fn access_token(&self) -> &str {
         &self.access_token
     }
-    fn refresh_token(&self) -> &str {
-        &self.refresh_token
+    fn device_id(&self) -> &str {
+        &self.device_id
+    }
+    fn device_secret(&self) -> &str {
+        &self.device_secret
     }
 }
 
@@ -77,15 +89,27 @@ struct DeviceList {
     devices: Vec<Device>,
 }
 #[derive(Deserialize, Serialize)]
-struct TokenPair {
+struct StoredCredentials {
+    device_id: String,
+    device_secret: String,
     access_token: String,
+}
+#[derive(Deserialize)]
+struct LegacyStoredCredentials {
+    #[allow(dead_code)]
+    access_token: String,
+    #[allow(dead_code)]
     refresh_token: String,
+}
+#[derive(Deserialize)]
+struct DeviceSession {
+    access_token: String,
 }
 #[derive(Deserialize)]
 struct Completion {
     device_id: String,
     access_token: String,
-    refresh_token: String,
+    device_secret: String,
     account_display_name: String,
     device_display_name: String,
     device_type: String,
@@ -155,38 +179,101 @@ impl OsCredentialStore {
             .map(|d| d.join("session.dpapi"))
             .ok_or(SessionError::SecureStorageUnavailable)
     }
+
+    fn recovery_path() -> Result<PathBuf, SessionError> {
+        Ok(Self::path()?.with_extension("dpapi.recovery"))
+    }
+}
+
+#[cfg(windows)]
+fn read_credentials(path: &PathBuf) -> Result<Option<NativeCredentials>, SessionError> {
+    let encrypted = match fs::read(path) {
+        Ok(value) => value,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(SessionError::SecureStorageUnavailable),
+    };
+    let plain = dpapi(false, &encrypted)?;
+    decode_credentials(&plain)
+}
+
+/// Decodes the current credential format and treats a successfully decrypted legacy refresh blob as absent.
+fn decode_credentials(plain: &[u8]) -> Result<Option<NativeCredentials>, SessionError> {
+    match serde_json::from_slice::<StoredCredentials>(plain) {
+        Ok(credentials) => NativeCredentials::new(
+            credentials.device_id,
+            credentials.device_secret,
+            credentials.access_token,
+        )
+        .map(Some),
+        Err(_) if serde_json::from_slice::<LegacyStoredCredentials>(plain).is_ok() => Ok(None),
+        Err(_) => Err(SessionError::SecureStorageUnavailable),
+    }
+}
+
+#[cfg(windows)]
+fn write_credentials(path: &PathBuf, credentials: &NativeCredentials) -> Result<(), SessionError> {
+    let plain = serde_json::to_vec(&StoredCredentials {
+        device_id: credentials.device_id.clone(),
+        device_secret: credentials.device_secret.clone(),
+        access_token: credentials.access_token.clone(),
+    })
+    .map_err(|_| SessionError::SecureStorageUnavailable)?;
+    let encrypted = dpapi(true, &plain)?;
+    let parent = path
+        .parent()
+        .ok_or(SessionError::SecureStorageUnavailable)?;
+    fs::create_dir_all(parent).map_err(|_| SessionError::SecureStorageUnavailable)?;
+    let temp = path.with_extension("new");
+    fs::write(&temp, &encrypted).map_err(|_| SessionError::SecureStorageUnavailable)?;
+    match fs::rename(&temp, path) {
+        Ok(()) => {}
+        Err(_) => {
+            fs::write(path, &encrypted).map_err(|_| SessionError::SecureStorageUnavailable)?;
+            let _ = fs::remove_file(&temp);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
 impl CredentialStore for OsCredentialStore {
     fn load(&self) -> Result<Option<NativeCredentials>, SessionError> {
         let path = Self::path()?;
-        let encrypted = match fs::read(path) {
-            Ok(value) => value,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(SessionError::SecureStorageUnavailable),
-        };
-        let plain = dpapi(false, &encrypted)?;
-        let pair: TokenPair =
-            serde_json::from_slice(&plain).map_err(|_| SessionError::SecureStorageUnavailable)?;
-        NativeCredentials::new(pair.access_token, pair.refresh_token).map(Some)
+        if let Some(credentials) = read_credentials(&path)? {
+            return Ok(Some(credentials));
+        }
+        let recovery = Self::recovery_path()?;
+        if let Some(credentials) = read_credentials(&recovery)? {
+            log::warn!("promoting recovered RockCast native session credentials");
+            let _ = self.save(&credentials);
+            return Ok(Some(credentials));
+        }
+        Ok(None)
     }
     fn save(&self, credentials: &NativeCredentials) -> Result<(), SessionError> {
-        let plain = serde_json::to_vec(&TokenPair {
-            access_token: credentials.access_token.clone(),
-            refresh_token: credentials.refresh_token.clone(),
-        })
-        .map_err(|_| SessionError::SecureStorageUnavailable)?;
-        let encrypted = dpapi(true, &plain)?;
         let path = Self::path()?;
-        let parent = path
-            .parent()
-            .ok_or(SessionError::SecureStorageUnavailable)?;
-        fs::create_dir_all(parent).map_err(|_| SessionError::SecureStorageUnavailable)?;
-        fs::write(path, encrypted).map_err(|_| SessionError::SecureStorageUnavailable)
+        let recovery = Self::recovery_path()?;
+        write_credentials(&recovery, credentials)?;
+        write_credentials(&path, credentials)?;
+        let _ = fs::remove_file(&recovery);
+        let persisted = read_credentials(&path)?.ok_or(SessionError::SecureStorageUnavailable)?;
+        if persisted.device_secret() != credentials.device_secret()
+            || persisted.device_id() != credentials.device_id()
+            || persisted.access_token() != credentials.access_token()
+        {
+            return Err(SessionError::SecureStorageUnavailable);
+        }
+        Ok(())
     }
     fn clear(&self) -> Result<(), SessionError> {
-        match fs::remove_file(Self::path()?) {
+        let path = Self::path()?;
+        let recovery = Self::recovery_path()?;
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(SessionError::SecureStorageUnavailable),
+        }
+        match fs::remove_file(recovery) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(SessionError::SecureStorageUnavailable),
@@ -356,8 +443,12 @@ impl<S: CredentialStore> AccountClient<S> {
             });
         }
         let result: Completion = response.json().map_err(|_| PairingPoll::Unavailable)?;
-        let credentials = NativeCredentials::new(result.access_token, result.refresh_token)
-            .map_err(|_| PairingPoll::Expired)?;
+        let credentials = NativeCredentials::new(
+            result.device_id.clone(),
+            result.device_secret,
+            result.access_token,
+        )
+        .map_err(|_| PairingPoll::Expired)?;
         Ok((
             AccountProfile {
                 device_id: result.device_id,
@@ -377,19 +468,38 @@ impl<S: CredentialStore> AccountClient<S> {
             .save(credentials)
             .map_err(|_| PairingPoll::SecureStorageUnavailable)
     }
-    pub(crate) fn refresh(&self) -> Result<(), SessionError> {
-        let old = self.store.load()?.ok_or(SessionError::Rejected)?;
-        let refresh_token = old.refresh_token().to_owned();
+    /// Issues an access token while the caller holds `SESSION_MUTEX`.
+    fn issue_device_session_without_lock(&self) -> Result<(), SessionError> {
+        let current = self.store.load()?.ok_or(SessionError::Rejected)?;
         let response = self
-            .request(reqwest::Method::POST, "/v1/auth/refresh")?
-            .json(&serde_json::json!({"refresh_token": refresh_token}))
+            .request(reqwest::Method::POST, "/v1/auth/device-session")?
+            .json(&serde_json::json!({
+                "device_id": current.device_id(),
+                "device_secret": current.device_secret(),
+            }))
             .send()
             .map_err(|_| SessionError::Unavailable)?;
         if response.status().as_u16() == 401 {
-            if self.store_still_has_refresh_token(&refresh_token) {
+            let invalid_credential = response
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|body| {
+                    body.get("code")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("device_credential_invalid");
+            if invalid_credential {
+                log::warn!("RockCast device credential was revoked; clearing local session.dpapi");
                 let _ = self.store.clear();
+                return Err(SessionError::Unauthorized);
+            } else {
+                log::warn!(
+                    "RockCast device-session request was rejected; keeping local credentials"
+                );
+                return Err(SessionError::Unavailable);
             }
-            return Err(SessionError::Unauthorized);
         }
         if !response.status().is_success() {
             return Err(if response.status().is_server_error() {
@@ -398,9 +508,17 @@ impl<S: CredentialStore> AccountClient<S> {
                 SessionError::Rejected
             });
         }
-        let pair: TokenPair = response.json().map_err(|_| SessionError::Unavailable)?;
-        NativeCredentials::new(pair.access_token, pair.refresh_token)
-            .and_then(|new| self.store.save(&new))
+        let session: DeviceSession = response.json().map_err(|_| SessionError::Unavailable)?;
+        NativeCredentials::new(
+            current.device_id,
+            current.device_secret,
+            session.access_token,
+        )
+        .and_then(|new| {
+            self.store.save(&new).map(|_| {
+                log::info!("RockCast native access token renewed");
+            })
+        })
     }
     pub(crate) fn has_credentials(&self) -> Result<bool, SessionError> {
         Ok(self.store.load()?.is_some())
@@ -422,57 +540,67 @@ impl<S: CredentialStore> AccountClient<S> {
         self.json::<DeviceList>(self.authorized(reqwest::Method::GET, "/v1/devices")?)
             .map(|list| list.devices)
     }
-    /// Loads profile and devices, refreshing only when the current access token is stale.
+    /// Loads profile and devices, obtaining a new access token once when the current one is stale.
     pub(crate) fn load_account_session(
         &self,
     ) -> Result<Option<(AccountProfile, Vec<Device>)>, SessionError> {
+        let _guard = SESSION_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !self.has_credentials()? {
             return Ok(None);
         }
-        match self.profile().and_then(|profile| {
-            self.devices().map(|devices| Some((profile, devices)))
-        }) {
+        match self
+            .profile()
+            .and_then(|profile| self.devices().map(|devices| Some((profile, devices))))
+        {
             Ok(session) => Ok(session),
-            Err(SessionError::Unauthorized) => self.refresh().and_then(|_| {
-                let profile = self.profile()?;
-                let devices = self.devices()?;
-                Ok(Some((profile, devices)))
-            }),
+            Err(SessionError::Unauthorized) => {
+                self.issue_device_session_without_lock().and_then(|_| {
+                    let profile = self.profile()?;
+                    let devices = self.devices()?;
+                    Ok(Some((profile, devices)))
+                })
+            }
             Err(error) => Err(error),
         }
     }
 
-    fn store_still_has_refresh_token(&self, refresh_token: &str) -> bool {
-        match self.store.load() {
-            Ok(Some(current)) => current.refresh_token() == refresh_token,
-            _ => false,
-        }
-    }
     #[allow(dead_code)]
     pub(crate) fn revoke_device(&self, device_id: &str) -> Result<(), SessionError> {
-        let r = self
+        let response = self
             .authorized(reqwest::Method::DELETE, &format!("/v1/devices/{device_id}"))?
             .send()
             .map_err(|_| SessionError::Unavailable)?;
-        if r.status().is_success() {
+        if response.status().is_success() {
             Ok(())
+        } else if response.status().as_u16() == 401 {
+            let _guard = SESSION_MUTEX
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            self.issue_device_session_without_lock()?;
+            let retry = self
+                .authorized(reqwest::Method::DELETE, &format!("/v1/devices/{device_id}"))?
+                .send()
+                .map_err(|_| SessionError::Unavailable)?;
+            if retry.status().is_success() {
+                Ok(())
+            } else {
+                Err(SessionError::Rejected)
+            }
         } else {
             Err(SessionError::Rejected)
         }
     }
     pub(crate) fn logout(&self) -> Result<(), SessionError> {
-        let outcome = self
-            .authorized(reqwest::Method::POST, "/v1/auth/logout")
-            .and_then(|r| r.send().map_err(|_| SessionError::Unavailable))
-            .and_then(|r| {
-                if r.status().is_success() || r.status().as_u16() == 401 {
-                    Ok(())
-                } else {
-                    Err(SessionError::Unavailable)
-                }
-            });
-        let clear = self.store.clear();
-        outcome.and(clear)
+        let device_id = self
+            .store
+            .load()?
+            .ok_or(SessionError::Rejected)?
+            .device_id()
+            .to_owned();
+        self.revoke_device(&device_id)?;
+        self.store.clear()
     }
 }
 
@@ -501,7 +629,8 @@ mod tests {
     }
     #[test]
     fn secrets_do_not_format_or_serialize() {
-        let credentials = NativeCredentials::new("a".repeat(16), "b".repeat(16)).unwrap();
+        let credentials =
+            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap();
         let store = Memory(Mutex::new(Some(credentials)));
         assert_eq!(store.load().unwrap().unwrap().access_token().len(), 16);
     }
@@ -512,6 +641,25 @@ mod tests {
             OsCredentialStore.load().unwrap_err(),
             SessionError::SecureStorageUnavailable
         );
+    }
+
+    #[test]
+    fn legacy_refresh_blob_is_an_absent_session_not_a_storage_failure() {
+        let legacy = br#"{"access_token":"aaaaaaaaaaaaaaaa","refresh_token":"bbbbbbbbbbbbbbbb"}"#;
+        assert!(decode_credentials(legacy).unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_dpapi_blob_is_an_absent_session_not_a_storage_failure() {
+        let path = std::env::temp_dir().join(format!(
+            "rockcast-legacy-session-{}.dpapi",
+            uuid::Uuid::new_v4()
+        ));
+        let legacy = br#"{"access_token":"aaaaaaaaaaaaaaaa","refresh_token":"bbbbbbbbbbbbbbbb"}"#;
+        fs::write(&path, dpapi(true, legacy).unwrap()).unwrap();
+        assert!(read_credentials(&path).unwrap().is_none());
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -619,7 +767,7 @@ mod tests {
 
     #[test]
     fn completed_pairing_saves_only_to_secure_store_seam() {
-        let body = r#"{"user_id":"must-not-be-used","device_id":"device","session_id":"session","access_token":"aaaaaaaaaaaaaaaa","refresh_token":"bbbbbbbbbbbbbbbb","account_display_name":"Alex's Rock account","device_display_name":"RockCast — test","device_type":"windows"}"#;
+        let body = r#"{"user_id":"must-not-be-used","device_id":"device","session_id":"session","access_token":"aaaaaaaaaaaaaaaa","device_secret":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","account_display_name":"Alex's Rock account","device_display_name":"RockCast — test","device_type":"windows"}"#;
         let (url, server) = server(200, body);
         let store = Memory(Mutex::new(None));
         let pairing = PairingRequest {
@@ -706,36 +854,58 @@ mod tests {
     }
 
     #[test]
-    fn refresh_401_clears_local_credentials() {
-        let (url, server) = server(401, "{}");
+    fn device_session_reuses_the_durable_credential() {
+        let (url, server) = server(200, r#"{"access_token":"cccccccccccccccc"}"#);
         let store = Memory(Mutex::new(Some(
-            NativeCredentials::new("a".repeat(16), "b".repeat(16)).unwrap(),
+            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
         )));
         let client = client(url, store);
-        assert_eq!(client.refresh().unwrap_err(), SessionError::Unauthorized);
-        assert!(client.store.load().unwrap().is_none());
-        assert!(server.join().unwrap().contains("/v1/auth/refresh"));
+        let _guard = SESSION_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        client.issue_device_session_without_lock().unwrap();
+        let credentials = client.store.load().unwrap().unwrap();
+        assert_eq!(credentials.access_token(), "cccccccccccccccc");
+        assert_eq!(credentials.device_secret(), "b".repeat(43));
+        let request = server.join().unwrap();
+        assert!(request.contains("/v1/auth/device-session"));
+        assert!(request.contains(r#""device_id":"device""#));
+        assert!(request.contains(r#""device_secret""#));
     }
 
     #[test]
-    fn refresh_5xx_keeps_local_credentials() {
+    fn unavailable_device_session_keeps_local_credentials() {
         let (url, server) = server(500, "{}");
         let store = Memory(Mutex::new(Some(
-            NativeCredentials::new("a".repeat(16), "b".repeat(16)).unwrap(),
+            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
         )));
         let client = client(url, store);
-        assert_eq!(client.refresh().unwrap_err(), SessionError::Unavailable);
+        let _guard = SESSION_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            client.issue_device_session_without_lock().unwrap_err(),
+            SessionError::Unavailable
+        );
         assert!(client.store.load().unwrap().is_some());
-        assert!(server.join().unwrap().contains("/v1/auth/refresh"));
+        assert!(server.join().unwrap().contains("/v1/auth/device-session"));
     }
 
     #[test]
-    fn logout_clears_local_credentials_when_server_is_offline() {
+    fn invalid_device_credential_clears_local_credentials() {
+        let (url, server) = server(401, r#"{"code":"device_credential_invalid"}"#);
         let store = Memory(Mutex::new(Some(
-            NativeCredentials::new("a".repeat(16), "b".repeat(16)).unwrap(),
+            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
         )));
-        let client = client("http://127.0.0.1:1".into(), store);
-        assert_eq!(client.logout().unwrap_err(), SessionError::Unavailable);
+        let client = client(url, store);
+        let _guard = SESSION_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            client.issue_device_session_without_lock().unwrap_err(),
+            SessionError::Unauthorized
+        );
         assert!(client.store.load().unwrap().is_none());
+        assert!(server.join().unwrap().contains("/v1/auth/device-session"));
     }
 }

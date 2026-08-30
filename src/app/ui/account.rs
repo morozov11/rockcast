@@ -1,5 +1,5 @@
 use super::super::{
-    account_session_active, AccountContext, AccountErrorKind, AccountUiState, RockCastApp,
+    AccountContext, AccountErrorKind, AccountUiState, RockCastApp, account_session_active,
 };
 use crate::{
     i18n,
@@ -33,6 +33,12 @@ impl RockCastApp {
                 loading_account: true,
             };
         }
+    }
+
+    pub(in crate::app) fn force_account_reload(&mut self) {
+        self.account_refreshing = false;
+        self.account_load_started = true;
+        self.spawn_account_load();
     }
 
     pub(in crate::app) fn refresh_account(&mut self) {
@@ -125,6 +131,19 @@ impl RockCastApp {
         }
         if !open {
             self.account_refreshing = false;
+            if matches!(
+                self.account_state,
+                AccountUiState::Starting {
+                    loading_account: true,
+                    ..
+                }
+            ) {
+                self.account_load_started = false;
+                self.account_state = AccountUiState::Disconnected {
+                    device_name: default_device_name(),
+                    message: None,
+                };
+            }
         }
         self.account_open = open;
     }
@@ -252,7 +271,6 @@ impl RockCastApp {
             }
             AccountUiState::Error { kind, cached } => {
                 ui.label(match kind {
-                    AccountErrorKind::AuthRequired => t.account_auth_required,
                     AccountErrorKind::Recoverable => t.account_unavailable,
                     AccountErrorKind::SecureStorage => t.account_storage_unavailable,
                 });
@@ -314,7 +332,10 @@ fn draw_current_account(ui: &mut egui::Ui, context: &AccountContext, t: &i18n::S
     ));
     ui.label(i18n::fmt1(
         t.account_current_device,
-        presentation_device_name(&context.profile.device_type, &context.profile.device_display_name),
+        presentation_device_name(
+            &context.profile.device_type,
+            &context.profile.device_display_name,
+        ),
     ));
     ui.label(t.account_connected);
 }
@@ -333,29 +354,13 @@ fn draw_connected(
     for device in context
         .devices
         .iter()
-        .filter(|device| device.device_id == context.profile.device_id)
-    {
-        ui.label(RichText::new(t.this_pc).strong());
-        ui.label(presentation_device_name(&device.device_type, &device.device_display_name));
-        if let Some(date) = display_date(&device.created_at, lang) {
-            ui.label(i18n::fmt1(t.account_connected_at, date));
-        }
-        if let Some(date) = device
-            .last_seen_at
-            .as_deref()
-            .and_then(|value| display_date(value, lang))
-        {
-            ui.label(i18n::fmt1(t.account_last_seen, date));
-        }
-        ui.separator();
-    }
-    for device in context
-        .devices
-        .iter()
         .filter(|device| device.device_id != context.profile.device_id)
     {
         other_device_shown = true;
-        ui.label(presentation_device_name(&device.device_type, &device.device_display_name));
+        ui.label(presentation_device_name(
+            &device.device_type,
+            &device.device_display_name,
+        ));
         if let Some(date) = display_date(&device.created_at, lang) {
             ui.label(i18n::fmt1(t.account_connected_at, date));
         }
@@ -534,22 +539,24 @@ mod tests {
     }
     #[test]
     fn account_session_active_only_for_connected_states() {
-        use crate::app::{account_session_active, AccountContext, AccountUiState};
+        use crate::app::{AccountContext, AccountUiState, account_session_active};
         assert!(!account_session_active(&AccountUiState::Disconnected {
             device_name: "PC".into(),
             message: None,
         }));
-        assert!(account_session_active(&AccountUiState::ConnectedFirstTime {
-            context: AccountContext {
-                profile: AccountProfile {
-                    device_id: "device".into(),
-                    account_display_name: "account".into(),
-                    device_display_name: "DESKTOP".into(),
-                    device_type: "windows".into(),
+        assert!(account_session_active(
+            &AccountUiState::ConnectedFirstTime {
+                context: AccountContext {
+                    profile: AccountProfile {
+                        device_id: "device".into(),
+                        account_display_name: "account".into(),
+                        device_display_name: "DESKTOP".into(),
+                        device_type: "windows".into(),
+                    },
+                    devices: Vec::new(),
                 },
-                devices: Vec::new(),
-            },
-        }));
+            }
+        ));
     }
 
     #[test]

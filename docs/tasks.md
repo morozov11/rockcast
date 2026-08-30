@@ -1,5 +1,17 @@
 # RockCast tasks
 
+## RM-011 — 2026-08-30 — durable device-secret client sessions
+
+- Goal: remove refresh-token rotation from RockCast so a transient renewal failure cannot disconnect
+  a paired PC.
+- Scope: replace the persisted refresh token with `device_id` and `device_secret`, request a short
+  access token from `/v1/auth/device-session`, and revoke the device for explicit disconnect.
+- Result: only an explicit `device_credential_invalid` response clears the local DPAPI credential;
+  unavailable or malformed renewal responses preserve it.
+- Checks: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test` passed.
+- Status: local client implementation complete; matching RockServer contract remains required for E2E.
+
 ## RM-011 Wave 9 — A4 secure pairing handoff (complete, 2026-08-29)
 
 - [x] Generate all existing QR/open/copy handoffs through the shared fragment-based link helper.

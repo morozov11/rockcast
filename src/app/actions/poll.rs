@@ -334,6 +334,13 @@ impl RockCastApp {
                         self.account_state,
                         super::super::AccountUiState::ConnectedFirstTime { .. }
                     );
+                    let loading_account = matches!(
+                        self.account_state,
+                        super::super::AccountUiState::Starting {
+                            loading_account: true,
+                            ..
+                        }
+                    );
                     let cached = match &self.account_state {
                         super::super::AccountUiState::Connected { context, .. }
                         | super::super::AccountUiState::ConnectedFirstTime { context } => {
@@ -360,7 +367,7 @@ impl RockCastApp {
                         }
                         Ok(None) => {
                             log::info!("account session probe: offline");
-                            if preserve_first_time {
+                            if preserve_first_time && !loading_account {
                                 continue;
                             }
                             super::super::AccountUiState::Disconnected {
@@ -370,7 +377,7 @@ impl RockCastApp {
                         }
                         Err(crate::session::SessionError::Unauthorized) => {
                             log::warn!("account session probe: credentials rejected");
-                            if preserve_first_time {
+                            if preserve_first_time && !loading_account {
                                 continue;
                             }
                             super::super::AccountUiState::Disconnected {
@@ -417,7 +424,7 @@ impl RockCastApp {
                                     devices: Vec::new(),
                                 },
                             };
-                            self.refresh_account();
+                            self.force_account_reload();
                         }
                         Err(crate::session::PairingPoll::SecureStorageUnavailable) => {
                             self.account_state = super::super::AccountUiState::Error {

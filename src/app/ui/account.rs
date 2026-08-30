@@ -1,4 +1,6 @@
-use super::super::{AccountContext, AccountErrorKind, AccountUiState, RockCastApp};
+use super::super::{
+    account_session_active, AccountContext, AccountErrorKind, AccountUiState, RockCastApp,
+};
 use crate::{
     i18n,
     session::{AccountClient, OsCredentialStore},
@@ -7,23 +9,38 @@ use eframe::egui::{self, Context, RichText};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 impl RockCastApp {
-    fn begin_account_load(&mut self) {
+    pub(in crate::app) fn ensure_account_loaded(&mut self) {
         if self.account_load_started {
             return;
         }
         self.account_load_started = true;
-        self.account_state = AccountUiState::Starting {
-            device_name: default_device_name(),
-            loading_account: true,
-        };
         self.spawn_account_load();
     }
 
-    fn refresh_account(&mut self) {
-        if self.account_refreshing {
+    fn begin_account_load(&mut self) {
+        if matches!(self.account_state, AccountUiState::Waiting { .. }) {
+            return;
+        }
+        if account_session_active(&self.account_state) {
+            return;
+        }
+        if !self.account_load_started {
+            return;
+        }
+        if !matches!(self.account_state, AccountUiState::Starting { .. }) {
+            self.account_state = AccountUiState::Starting {
+                device_name: default_device_name(),
+                loading_account: true,
+            };
+        }
+    }
+
+    pub(in crate::app) fn refresh_account(&mut self) {
+        if self.account_load_started || self.account_refreshing {
             return;
         }
         self.account_refreshing = true;
+        self.account_load_started = true;
         if let AccountUiState::Connected { banner, .. } = &mut self.account_state {
             *banner = Some(self.lang.t().account_checking.into());
         }
@@ -37,19 +54,12 @@ impl RockCastApp {
             .playback
             .spawn_job(move |_| {
                 let client = AccountClient::new(config, OsCredentialStore);
-                let result = match client.has_credentials() {
-                    Ok(false) => Ok(None),
-                    Ok(true) => client.refresh().and_then(|_| {
-                        client.profile().and_then(|profile| {
-                            client.devices().map(|devices| Some((profile, devices)))
-                        })
-                    }),
-                    Err(error) => Err(error),
-                };
+                let result = client.load_account_session();
                 let _ = tx.send(super::super::messages::UiMsg::AccountLoaded(result));
             })
             .is_err()
         {
+            self.account_load_started = false;
             self.account_refreshing = false;
             self.account_state = AccountUiState::Error {
                 kind: AccountErrorKind::Recoverable,
@@ -114,7 +124,6 @@ impl RockCastApp {
             self.cancel_pairing();
         }
         if !open {
-            self.account_load_started = false;
             self.account_refreshing = false;
         }
         self.account_open = open;
@@ -175,7 +184,7 @@ impl RockCastApp {
                 if !*loading_account {
                     ui.label(i18n::fmt1(
                         t.account_device,
-                        presentation_device_name(device_name),
+                        presentation_device_name(std::env::consts::OS, device_name),
                     ));
                 }
                 ui.label(t.account_offline_note);
@@ -186,7 +195,7 @@ impl RockCastApp {
                 ui.label(status.as_str());
                 ui.label(i18n::fmt1(
                     t.account_device,
-                    presentation_device_name(&request.device_display_name),
+                    presentation_device_name(&request.device_type, &request.device_display_name),
                 ));
                 ui.label(i18n::fmt1(
                     t.account_expires_in,
@@ -305,7 +314,7 @@ fn draw_current_account(ui: &mut egui::Ui, context: &AccountContext, t: &i18n::S
     ));
     ui.label(i18n::fmt1(
         t.account_current_device,
-        presentation_device_name(&context.profile.device_display_name),
+        presentation_device_name(&context.profile.device_type, &context.profile.device_display_name),
     ));
     ui.label(t.account_connected);
 }
@@ -319,14 +328,34 @@ fn draw_connected(
     draw_current_account(ui, context, t);
     ui.separator();
     ui.label(RichText::new(t.account_other_devices).strong());
-    let mut other = false;
+    let mut other_device_shown = false;
     let mut revoke = None;
-    for device in &context.devices {
-        if device.device_id == context.profile.device_id {
-            continue;
+    for device in context
+        .devices
+        .iter()
+        .filter(|device| device.device_id == context.profile.device_id)
+    {
+        ui.label(RichText::new(t.this_pc).strong());
+        ui.label(presentation_device_name(&device.device_type, &device.device_display_name));
+        if let Some(date) = display_date(&device.created_at, lang) {
+            ui.label(i18n::fmt1(t.account_connected_at, date));
         }
-        other = true;
-        ui.label(presentation_device_name(&device.device_display_name));
+        if let Some(date) = device
+            .last_seen_at
+            .as_deref()
+            .and_then(|value| display_date(value, lang))
+        {
+            ui.label(i18n::fmt1(t.account_last_seen, date));
+        }
+        ui.separator();
+    }
+    for device in context
+        .devices
+        .iter()
+        .filter(|device| device.device_id != context.profile.device_id)
+    {
+        other_device_shown = true;
+        ui.label(presentation_device_name(&device.device_type, &device.device_display_name));
         if let Some(date) = display_date(&device.created_at, lang) {
             ui.label(i18n::fmt1(t.account_connected_at, date));
         }
@@ -342,7 +371,7 @@ fn draw_connected(
         }
         ui.separator();
     }
-    if !other {
+    if !other_device_shown {
         ui.label(t.account_empty_devices);
     }
     revoke
@@ -352,14 +381,20 @@ fn default_device_name() -> String {
     super::super::default_pairing_device_name()
 }
 
-pub(super) fn presentation_device_name(value: &str) -> String {
+pub(super) fn presentation_device_name(device_type: &str, value: &str) -> String {
+    let product = if device_type.to_ascii_lowercase().contains("mobile") {
+        "RockMobile"
+    } else {
+        "RockCast"
+    };
     let raw = value.trim();
-    format!(
-        "RockCast — {}",
-        raw.strip_prefix("RockCast — ")
-            .or_else(|| raw.strip_prefix("RockCast - "))
-            .unwrap_or(raw)
-    )
+    let stripped = raw
+        .strip_prefix("RockMobile — ")
+        .or_else(|| raw.strip_prefix("RockMobile - "))
+        .or_else(|| raw.strip_prefix("RockCast — "))
+        .or_else(|| raw.strip_prefix("RockCast - "))
+        .unwrap_or(raw);
+    format!("{product} — {stripped}")
 }
 
 fn countdown(expires_at: &str) -> String {
@@ -468,10 +503,26 @@ mod tests {
         }
     }
     #[test]
-    fn device_presentation_adds_one_rockcast_prefix() {
+    fn device_presentation_uses_product_from_device_type() {
         assert_eq!(
-            presentation_device_name("RockCast — DESKTOP"),
+            presentation_device_name("windows", "RockCast — DESKTOP"),
             "RockCast — DESKTOP"
+        );
+        assert_eq!(
+            presentation_device_name("rockmobile_android", "RMX5056"),
+            "RockMobile — RMX5056"
+        );
+        assert_eq!(
+            presentation_device_name("rockmobile_android", "RockMobile — RMX5056"),
+            "RockMobile — RMX5056"
+        );
+        assert_eq!(
+            presentation_device_name("rockmobile_android", "RockCast — RMX5056"),
+            "RockMobile — RMX5056"
+        );
+        assert_eq!(
+            presentation_device_name("windows", "RockCast — Office"),
+            "RockCast — Office"
         );
     }
     #[test]
@@ -481,6 +532,26 @@ mod tests {
         assert_eq!(module_size, 6);
         assert!((256..=320).contains(&(modules * module_size)));
     }
+    #[test]
+    fn account_session_active_only_for_connected_states() {
+        use crate::app::{account_session_active, AccountContext, AccountUiState};
+        assert!(!account_session_active(&AccountUiState::Disconnected {
+            device_name: "PC".into(),
+            message: None,
+        }));
+        assert!(account_session_active(&AccountUiState::ConnectedFirstTime {
+            context: AccountContext {
+                profile: AccountProfile {
+                    device_id: "device".into(),
+                    account_display_name: "account".into(),
+                    device_display_name: "DESKTOP".into(),
+                    device_type: "windows".into(),
+                },
+                devices: Vec::new(),
+            },
+        }));
+    }
+
     #[test]
     fn connected_and_loading_screens_never_offer_pairing() {
         let loading = AccountUiState::Starting {

@@ -71,6 +71,13 @@ pub(super) enum AccountErrorKind {
     SecureStorage,
 }
 
+pub(super) fn account_session_active(state: &AccountUiState) -> bool {
+    matches!(
+        state,
+        AccountUiState::Connected { .. } | AccountUiState::ConnectedFirstTime { .. }
+    )
+}
+
 pub struct RockCastApp {
     pub(super) playback: PlaybackController,
     pub(super) stations: Vec<Station>,
@@ -266,7 +273,10 @@ impl eframe::App for RockCastApp {
             || self.loading_devices
             || self.station_icons_pending > 0
             || self.settings_dirty
-            || self.voice_busy;
+            || self.voice_busy
+            || self.account_load_started
+            || self.account_refreshing
+            || matches!(self.account_state, AccountUiState::Waiting { .. });
         let snap = PlaybackSnapshot {
             playing: self.playing,
             eq_enabled: self.eq_enabled,
@@ -328,7 +338,7 @@ impl eframe::App for RockCastApp {
                         if ui.button(format!("History ({history_count})")).clicked() {
                             self.history_open = true;
                         }
-                        if ui.button("Account").clicked() {
+                        if ui.button(self.account_menu_label()).clicked() {
                             self.account_open = true;
                         }
                         let favourites_count = self.personal_data.as_ref().map_or(0, |store| {
@@ -416,6 +426,15 @@ impl Drop for RockCastApp {
 }
 
 impl RockCastApp {
+    pub(in crate::app) fn account_menu_label(&self) -> String {
+        let t = self.lang.t();
+        if account_session_active(&self.account_state) {
+            t.account_menu_connected.into()
+        } else {
+            t.account_menu.into()
+        }
+    }
+
     fn poll_pairing(&mut self) {
         let AccountUiState::Waiting {
             request: pairing, ..
@@ -464,6 +483,14 @@ impl RockCastApp {
                                 let _ = tx.send(UiMsg::PairingResult {
                                     request_id: pairing.pairing_request_id.clone(),
                                     result: Err(reason),
+                                });
+                                return;
+                            }
+                            if !client.has_credentials().unwrap_or(false) {
+                                log::error!("pairing credentials were not persisted locally");
+                                let _ = tx.send(UiMsg::PairingResult {
+                                    request_id: pairing.pairing_request_id.clone(),
+                                    result: Err(crate::session::PairingPoll::SecureStorageUnavailable),
                                 });
                                 return;
                             }

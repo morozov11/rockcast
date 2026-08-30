@@ -379,13 +379,16 @@ impl<S: CredentialStore> AccountClient<S> {
     }
     pub(crate) fn refresh(&self) -> Result<(), SessionError> {
         let old = self.store.load()?.ok_or(SessionError::Rejected)?;
+        let refresh_token = old.refresh_token().to_owned();
         let response = self
             .request(reqwest::Method::POST, "/v1/auth/refresh")?
-            .json(&serde_json::json!({"refresh_token": old.refresh_token()}))
+            .json(&serde_json::json!({"refresh_token": refresh_token}))
             .send()
             .map_err(|_| SessionError::Unavailable)?;
         if response.status().as_u16() == 401 {
-            let _ = self.store.clear();
+            if self.store_still_has_refresh_token(&refresh_token) {
+                let _ = self.store.clear();
+            }
             return Err(SessionError::Unauthorized);
         }
         if !response.status().is_success() {
@@ -413,18 +416,37 @@ impl<S: CredentialStore> AccountClient<S> {
             .bearer_auth(credentials.access_token()))
     }
     pub(crate) fn profile(&self) -> Result<AccountProfile, SessionError> {
-        let result = self.json(self.authorized(reqwest::Method::GET, "/v1/account/profile")?);
-        if matches!(&result, Err(SessionError::Unauthorized)) {
-            let _ = self.store.clear();
-        }
-        result
+        self.json(self.authorized(reqwest::Method::GET, "/v1/account/profile")?)
     }
     pub(crate) fn devices(&self) -> Result<Vec<Device>, SessionError> {
-        let result = self.json::<DeviceList>(self.authorized(reqwest::Method::GET, "/v1/devices")?);
-        if matches!(&result, Err(SessionError::Unauthorized)) {
-            let _ = self.store.clear();
+        self.json::<DeviceList>(self.authorized(reqwest::Method::GET, "/v1/devices")?)
+            .map(|list| list.devices)
+    }
+    /// Loads profile and devices, refreshing only when the current access token is stale.
+    pub(crate) fn load_account_session(
+        &self,
+    ) -> Result<Option<(AccountProfile, Vec<Device>)>, SessionError> {
+        if !self.has_credentials()? {
+            return Ok(None);
         }
-        result.map(|list| list.devices)
+        match self.profile().and_then(|profile| {
+            self.devices().map(|devices| Some((profile, devices)))
+        }) {
+            Ok(session) => Ok(session),
+            Err(SessionError::Unauthorized) => self.refresh().and_then(|_| {
+                let profile = self.profile()?;
+                let devices = self.devices()?;
+                Ok(Some((profile, devices)))
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn store_still_has_refresh_token(&self, refresh_token: &str) -> bool {
+        match self.store.load() {
+            Ok(Some(current)) => current.refresh_token() == refresh_token,
+            _ => false,
+        }
     }
     #[allow(dead_code)]
     pub(crate) fn revoke_device(&self, device_id: &str) -> Result<(), SessionError> {

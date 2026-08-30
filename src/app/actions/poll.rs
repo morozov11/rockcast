@@ -323,6 +323,17 @@ impl RockCastApp {
                 },
                 UiMsg::AccountLoaded(result) => {
                     self.account_refreshing = false;
+                    self.account_load_started = false;
+                    if matches!(
+                        self.account_state,
+                        super::super::AccountUiState::Waiting { .. }
+                    ) {
+                        continue;
+                    }
+                    let preserve_first_time = matches!(
+                        self.account_state,
+                        super::super::AccountUiState::ConnectedFirstTime { .. }
+                    );
                     let cached = match &self.account_state {
                         super::super::AccountUiState::Connected { context, .. }
                         | super::super::AccountUiState::ConnectedFirstTime { context } => {
@@ -332,18 +343,39 @@ impl RockCastApp {
                         _ => None,
                     };
                     self.account_state = match result {
-                        Ok(Some((profile, devices))) => super::super::AccountUiState::Connected {
-                            context: super::super::AccountContext { profile, devices },
-                            banner: None,
-                        },
-                        Ok(None) => super::super::AccountUiState::Disconnected {
-                            device_name: super::super::default_pairing_device_name(),
-                            message: None,
-                        },
+                        Ok(Some((profile, devices))) => {
+                            log::info!(
+                                "account session loaded for device {}",
+                                profile.device_display_name
+                            );
+                            let context = super::super::AccountContext { profile, devices };
+                            if preserve_first_time {
+                                super::super::AccountUiState::ConnectedFirstTime { context }
+                            } else {
+                                super::super::AccountUiState::Connected {
+                                    context,
+                                    banner: None,
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            log::info!("account session probe: offline");
+                            if preserve_first_time {
+                                continue;
+                            }
+                            super::super::AccountUiState::Disconnected {
+                                device_name: super::super::default_pairing_device_name(),
+                                message: None,
+                            }
+                        }
                         Err(crate::session::SessionError::Unauthorized) => {
-                            super::super::AccountUiState::Error {
-                                kind: super::super::AccountErrorKind::AuthRequired,
-                                cached: None,
+                            log::warn!("account session probe: credentials rejected");
+                            if preserve_first_time {
+                                continue;
+                            }
+                            super::super::AccountUiState::Disconnected {
+                                device_name: super::super::default_pairing_device_name(),
+                                message: Some(self.lang.t().account_session_reconnect.into()),
                             }
                         }
                         Err(crate::session::SessionError::SecureStorageUnavailable) => {
@@ -377,12 +409,15 @@ impl RockCastApp {
                     self.pairing_cancel = None;
                     match result {
                         Ok(profile) => {
+                            self.account_load_started = false;
+                            self.account_refreshing = false;
                             self.account_state = super::super::AccountUiState::ConnectedFirstTime {
                                 context: super::super::AccountContext {
                                     profile,
                                     devices: Vec::new(),
                                 },
                             };
+                            self.refresh_account();
                         }
                         Err(crate::session::PairingPoll::SecureStorageUnavailable) => {
                             self.account_state = super::super::AccountUiState::Error {

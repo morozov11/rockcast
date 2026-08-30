@@ -18,6 +18,7 @@ impl RockCastApp {
         self.bootstrapped = true;
         self.refresh_stations();
         self.refresh_devices();
+        self.ensure_account_loaded();
     }
 
     pub(in crate::app) fn refresh_stations(&mut self) {

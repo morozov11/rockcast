@@ -23,8 +23,8 @@ impl RockCastApp {
                 .iter()
                 .map(|d| d.label(self.lang))
                 .collect();
-            let find_w = 88.0;
-            // Combo fills remaining width after Find.
+            let find_w = 142.0;
+            // Combo fills remaining width after device discovery.
             let combo_w = (ui.available_width() - find_w - 10.0).max(160.0);
 
             let selected_text = match self.selected_device.and_then(|i| labels.get(i)) {

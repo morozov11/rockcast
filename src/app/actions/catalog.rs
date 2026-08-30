@@ -22,30 +22,41 @@ impl RockCastApp {
     }
 
     pub(in crate::app) fn refresh_stations(&mut self) {
+        self.search_stations(String::new());
+    }
+
+    pub(in crate::app) fn search_stations(&mut self, query: String) {
         if self.loading_stations {
-            return;
+            // The previous request cannot be cancelled once HTTP is in flight, but
+            // its messages are tagged and ignored below.
         }
+        self.station_request_id = self.station_request_id.wrapping_add(1);
+        let request_id = self.station_request_id;
         self.loading_stations = true;
         self.status = self.lang.t().loading_stations_status.into();
         let tx = self.ui_tx.clone();
         let lang = self.lang;
         let rockserver = self.rockserver.clone();
+        let query = query.trim().to_owned();
         let _ = self.playback.spawn_job(move |cancel| {
             if cancel.is_cancelled() {
                 return;
             }
-            let (catalog, source) = load_catalog(lang);
-            let _ = tx.send(UiMsg::Stations {
-                list: catalog.clone(),
-                source,
-                finished: false,
-            });
             let locale = match lang {
                 Lang::Ru => "ru",
                 Lang::En => "en",
             };
-            match crate::rockserver::search(&rockserver, "", locale) {
-                Ok(stations) if !stations.is_empty() => {
+            if query.is_empty() {
+                let (catalog, source) = load_catalog(lang);
+                let _ = tx.send(UiMsg::Stations {
+                    list: catalog.clone(),
+                    source,
+                    request_id,
+                    finished: false,
+                });
+            }
+            match crate::rockserver::search(&rockserver, &query, locale) {
+                Ok(stations) => {
                     if cancel.is_cancelled() {
                         return;
                     }
@@ -53,13 +64,28 @@ impl RockCastApp {
                     let _ = tx.send(UiMsg::Stations {
                         list: stations,
                         source: format!("RockServer · {n}"),
+                        request_id,
                         finished: true,
                     });
                     return;
                 }
-                Ok(_) => log::info!("RockServer returned empty station list, falling back"),
                 Err(e) => log::warn!("RockServer search failed: {e}; falling back"),
             }
+            if !query.is_empty() {
+                let (catalog, source) = load_catalog(lang);
+                let list = catalog
+                    .into_iter()
+                    .filter(|station| station_matches(station, &query))
+                    .collect();
+                let _ = tx.send(UiMsg::Stations {
+                    list,
+                    source: format!("{source} · offline results"),
+                    request_id,
+                    finished: true,
+                });
+                return;
+            }
+            let (catalog, _) = load_catalog(lang);
             let (merged, source) = enrich_stations(catalog, lang);
             if cancel.is_cancelled() {
                 return;
@@ -67,6 +93,7 @@ impl RockCastApp {
             let _ = tx.send(UiMsg::Stations {
                 list: merged,
                 source,
+                request_id,
                 finished: true,
             });
         });
@@ -101,4 +128,19 @@ impl RockCastApp {
             }
         });
     }
+}
+
+fn station_matches(station: &crate::stations::Station, query: &str) -> bool {
+    let haystack = format!(
+        "{} {} {} {}",
+        station.name,
+        station.tags,
+        station.country,
+        station.aliases.join(" ")
+    )
+    .to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|term| haystack.contains(term))
 }

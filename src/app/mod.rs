@@ -80,6 +80,11 @@ pub(super) fn account_session_active(state: &AccountUiState) -> bool {
 pub struct RockCastApp {
     pub(super) playback: PlaybackController,
     pub(super) stations: Vec<Station>,
+    /// Text sent to the global RockServer station search.
+    pub(super) station_search: String,
+    pub(super) selected_genre: Option<String>,
+    /// Lets the UI discard results from an older global search.
+    pub(super) station_request_id: u64,
     pub(super) devices: Vec<OutputDevice>,
     pub(super) source: String,
     pub(super) selected_station: Option<usize>,
@@ -178,6 +183,9 @@ impl RockCastApp {
         Self {
             playback: PlaybackController::new(),
             stations: Vec::new(),
+            station_search: String::new(),
+            selected_genre: None,
+            station_request_id: 0,
             devices: Vec::new(),
             source: String::new(),
             selected_station: None,

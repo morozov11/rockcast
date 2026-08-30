@@ -132,8 +132,12 @@ impl RockCastApp {
                 UiMsg::Stations {
                     list,
                     source,
+                    request_id,
                     finished,
                 } => {
+                    if request_id != self.station_request_id {
+                        continue;
+                    }
                     self.stations = list;
                     self.queue_station_icons(&self.stations.clone());
                     if self.personal_data.is_none() {

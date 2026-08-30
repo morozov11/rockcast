@@ -10,6 +10,8 @@ use super::super::theme::*;
 impl RockCastApp {
     pub(in crate::app) fn draw_station_list(&mut self, ui: &mut Ui, list_h: f32) {
         let t = self.lang.t();
+        let mut search_requested = false;
+        let mut return_home = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new(t.stations).color(FG).size(15.0).strong());
             if !self.source.is_empty() {
@@ -22,17 +24,70 @@ impl RockCastApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let btn = egui::Button::new(RichText::new(t.refresh).color(FG))
                     .fill(PANEL_2)
-                    .min_size(Vec2::new(92.0, 26.0));
-                if ui.add_enabled(!self.loading_stations, btn).clicked() {
-                    self.refresh_stations();
+                    .min_size(Vec2::new(210.0, 26.0));
+                if ui.add(btn).clicked() {
+                    return_home = true;
                 }
             });
         });
         ui.add_space(4.0);
 
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(t.station_search).color(MUTED).size(12.0));
+            let response = ui.add_sized(
+                [ui.available_width() - 86.0, 26.0],
+                egui::TextEdit::singleline(&mut self.station_search).hint_text(t.station_search),
+            );
+            let enter =
+                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if ui
+                .add_enabled(
+                    !self.station_search.trim().is_empty() || self.selected_genre.is_some(),
+                    egui::Button::new(t.station_search_action),
+                )
+                .clicked()
+                || enter
+            {
+                search_requested = true;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(t.genres).color(MUTED).size(12.0));
+            for genre in [
+                "Rock",
+                "Metal",
+                "Classic Rock",
+                "Alternative",
+                "Hard Rock",
+                "Punk",
+                "Progressive",
+                "Indie",
+            ] {
+                let selected = self.selected_genre.as_deref() == Some(genre);
+                if ui.selectable_label(selected, genre).clicked() {
+                    self.selected_genre = (!selected).then(|| genre.to_owned());
+                    search_requested = true;
+                }
+            }
+        });
+        ui.add_space(6.0);
+
+        if return_home {
+            self.station_search.clear();
+            self.selected_genre = None;
+            self.refresh_stations();
+        } else if search_requested {
+            let query = self.global_station_query();
+            if query.is_empty() {
+                self.refresh_stations();
+            } else {
+                self.search_stations(query);
+            }
+        }
+
         let mut should_play = false;
         let mut clicked_station: Option<usize> = None;
-        let scroll_h = (list_h - 72.0).max(100.0);
+        let scroll_h = (list_h - 136.0).max(100.0);
         let col_station = t.col_station;
         let col_tags = t.col_tags;
         let col_country = t.col_country;
@@ -360,5 +415,18 @@ impl RockCastApp {
             log::info!("station double-click → play()");
             self.play();
         }
+    }
+
+    fn global_station_query(&self) -> String {
+        let mut terms = self.station_search.trim().to_owned();
+        if let Some(genre) = &self.selected_genre
+            && !terms.to_lowercase().contains(&genre.to_lowercase())
+        {
+            if !terms.is_empty() {
+                terms.push(' ');
+            }
+            terms.push_str(genre);
+        }
+        terms
     }
 }

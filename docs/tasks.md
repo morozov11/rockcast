@@ -1,11 +1,22 @@
 # RockCast tasks
 
+## Voice route selection — 2026-09-02
+
+- Goal: keep anonymous voice usable while sending paired RockCast voice sessions with a current
+  native-session token.
+- Result: all voice sessions use `/api/v1/voice/stream`; a persisted credential is renewed through
+  `/api/v1/auth/device-session` and sent as Bearer when available. Renewal failures preserve the
+  binding and use that same voice path anonymously.
+- Checks: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test` passed; external stream probes remain ignored.
+- Status: **implemented locally.**
+
 ## RM-011 — 2026-08-30 — durable device-secret client sessions
 
 - Goal: remove refresh-token rotation from RockCast so a transient renewal failure cannot disconnect
   a paired PC.
 - Scope: replace the persisted refresh token with `device_id` and `device_secret`, request a short
-  access token from `/v1/auth/device-session`, and revoke the device for explicit disconnect.
+  access token from `/api/v1/auth/device-session`, and revoke the device for explicit disconnect.
 - Result: only an explicit `device_credential_invalid` response clears the local DPAPI credential;
   unavailable or malformed renewal responses preserve it.
 - Checks: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and
@@ -62,7 +73,7 @@
 
 - [x] Use the production HTTPS RockServer base URL in official releases.
 - [x] Remove RockServer URL/token requirements from ordinary user settings and UI.
-- [x] Call public `/v1/search` and `/v1/voice/stream` without Bearer authorization.
+- [x] Call public `/api/v1/search` and `/api/v1/voice/stream` without Bearer authorization.
 - [x] Preserve HTTPS-to-WSS TLS and avoid legacy protected `/api/v1` aliases.
 - [x] Isolate endpoint/token/voice-mode overrides to debug/test runtime without
       displaying or logging their values.

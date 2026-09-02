@@ -453,7 +453,7 @@ fn websocket_url(base: &str) -> Result<String, String> {
     } else {
         return Err("RockServer URL must start with http:// or https://".into());
     };
-    Ok(format!("{scheme}/v1/voice/stream"))
+    Ok(format!("{scheme}/api/v1/voice/stream"))
 }
 
 /// Extracts the TCP endpoint from a WebSocket URL, supplying the standard port
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn voice_websocket_endpoint_uses_default_ports() {
         let secure_url = websocket_url("https://alex.vault57.ru").unwrap();
-        assert_eq!(secure_url, "wss://alex.vault57.ru/v1/voice/stream");
+        assert_eq!(secure_url, "wss://alex.vault57.ru/api/v1/voice/stream");
         assert_eq!(
             voice_socket_endpoint(&secure_url).unwrap(),
             (
@@ -513,7 +513,7 @@ mod tests {
         );
 
         let plain_url = websocket_url("http://rockserver.local").unwrap();
-        assert_eq!(plain_url, "ws://rockserver.local/v1/voice/stream");
+        assert_eq!(plain_url, "ws://rockserver.local/api/v1/voice/stream");
         assert_eq!(
             voice_socket_endpoint(&plain_url).unwrap(),
             (
@@ -527,21 +527,21 @@ mod tests {
     #[test]
     fn public_voice_handshake_has_no_authorization_header() {
         let request = voice_handshake_request(
-            "wss://alex.vault57.ru/v1/voice/stream",
+            "wss://alex.vault57.ru/api/v1/voice/stream",
             "alex.vault57.ru",
             "test-websocket-key",
             None,
         )
         .unwrap();
         assert_eq!(request.uri().scheme_str(), Some("wss"));
-        assert_eq!(request.uri().path(), "/v1/voice/stream");
+        assert_eq!(request.uri().path(), "/api/v1/voice/stream");
         assert!(request.headers().get("Authorization").is_none());
     }
 
     #[test]
     fn developer_voice_override_can_add_bearer() {
         let request = voice_handshake_request(
-            "ws://127.0.0.1:3000/v1/voice/stream",
+            "ws://127.0.0.1:3000/api/v1/voice/stream",
             "127.0.0.1:3000",
             "test-websocket-key",
             Some("dev-test-token"),
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn protocol_sample_rate_errors_stay_as_message() {
         assert!(matches!(
-            VoiceError::from("sample_rate_hz must be 16000 for /v1/voice/stream".to_owned()),
+            VoiceError::from("sample_rate_hz must be 16000 for /api/v1/voice/stream".to_owned()),
             VoiceError::Message(_)
         ));
     }

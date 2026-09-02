@@ -395,7 +395,7 @@ impl<S: CredentialStore> AccountClient<S> {
             return Err(SessionError::Rejected);
         }
         self.json(
-            self.request(reqwest::Method::POST, "/v1/pairing-requests")?
+            self.request(reqwest::Method::POST, "/api/v1/pairing-requests")?
                 .json(&serde_json::json!({
                     "device_display_name": device_display_name,
                     "device_type": std::env::consts::OS,
@@ -411,7 +411,7 @@ impl<S: CredentialStore> AccountClient<S> {
             .request(
                 reqwest::Method::POST,
                 &format!(
-                    "/v1/pairing-requests/{}/complete",
+                    "/api/v1/pairing-requests/{}/complete",
                     pairing.pairing_request_id
                 ),
             )
@@ -472,7 +472,7 @@ impl<S: CredentialStore> AccountClient<S> {
     fn issue_device_session_without_lock(&self) -> Result<(), SessionError> {
         let current = self.store.load()?.ok_or(SessionError::Rejected)?;
         let response = self
-            .request(reqwest::Method::POST, "/v1/auth/device-session")?
+            .request(reqwest::Method::POST, "/api/v1/auth/device-session")?
             .json(&serde_json::json!({
                 "device_id": current.device_id(),
                 "device_secret": current.device_secret(),
@@ -523,6 +523,20 @@ impl<S: CredentialStore> AccountClient<S> {
     pub(crate) fn has_credentials(&self) -> Result<bool, SessionError> {
         Ok(self.store.load()?.is_some())
     }
+    /// Returns a renewed native access token for an authenticated voice session.
+    pub(crate) fn voice_access_token(&self) -> Result<Option<String>, SessionError> {
+        let _guard = SESSION_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.has_credentials()? {
+            return Ok(None);
+        }
+        self.issue_device_session_without_lock()?;
+        Ok(self
+            .store
+            .load()?
+            .map(|credentials| credentials.access_token().to_owned()))
+    }
     fn authorized(
         &self,
         method: reqwest::Method,
@@ -534,10 +548,10 @@ impl<S: CredentialStore> AccountClient<S> {
             .bearer_auth(credentials.access_token()))
     }
     pub(crate) fn profile(&self) -> Result<AccountProfile, SessionError> {
-        self.json(self.authorized(reqwest::Method::GET, "/v1/account/profile")?)
+        self.json(self.authorized(reqwest::Method::GET, "/api/v1/account/profile")?)
     }
     pub(crate) fn devices(&self) -> Result<Vec<Device>, SessionError> {
-        self.json::<DeviceList>(self.authorized(reqwest::Method::GET, "/v1/devices")?)
+        self.json::<DeviceList>(self.authorized(reqwest::Method::GET, "/api/v1/devices")?)
             .map(|list| list.devices)
     }
     /// Loads profile and devices, obtaining a new access token once when the current one is stale.
@@ -569,7 +583,10 @@ impl<S: CredentialStore> AccountClient<S> {
     #[allow(dead_code)]
     pub(crate) fn revoke_device(&self, device_id: &str) -> Result<(), SessionError> {
         let response = self
-            .authorized(reqwest::Method::DELETE, &format!("/v1/devices/{device_id}"))?
+            .authorized(
+                reqwest::Method::DELETE,
+                &format!("/api/v1/devices/{device_id}"),
+            )?
             .send()
             .map_err(|_| SessionError::Unavailable)?;
         if response.status().is_success() {
@@ -580,7 +597,10 @@ impl<S: CredentialStore> AccountClient<S> {
                 .unwrap_or_else(|error| error.into_inner());
             self.issue_device_session_without_lock()?;
             let retry = self
-                .authorized(reqwest::Method::DELETE, &format!("/v1/devices/{device_id}"))?
+                .authorized(
+                    reqwest::Method::DELETE,
+                    &format!("/api/v1/devices/{device_id}"),
+                )?
                 .send()
                 .map_err(|_| SessionError::Unavailable)?;
             if retry.status().is_success() {
@@ -738,7 +758,7 @@ mod tests {
         assert_eq!(pairing.status, "pending");
         let request = server.join().unwrap();
         let request_lower = request.to_ascii_lowercase();
-        assert!(request_lower.starts_with("post /v1/pairing-requests"));
+        assert!(request_lower.starts_with("post /api/v1/pairing-requests"));
         assert!(request.contains(r#""device_display_name":"RockCast — test""#));
         assert!(request.contains(r#""device_type":"windows""#));
         assert!(!request_lower.contains("\"device_name\""));
@@ -868,9 +888,28 @@ mod tests {
         assert_eq!(credentials.access_token(), "cccccccccccccccc");
         assert_eq!(credentials.device_secret(), "b".repeat(43));
         let request = server.join().unwrap();
-        assert!(request.contains("/v1/auth/device-session"));
+        assert!(request.contains("/api/v1/auth/device-session"));
         assert!(request.contains(r#""device_id":"device""#));
         assert!(request.contains(r#""device_secret""#));
+    }
+
+    #[test]
+    fn voice_access_token_renews_the_paired_session() {
+        let (url, server) = server(200, r#"{"access_token":"cccccccccccccccc"}"#);
+        let store = Memory(Mutex::new(Some(
+            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
+        )));
+        let client = client(url, store);
+        assert_eq!(
+            client.voice_access_token().unwrap().as_deref(),
+            Some("cccccccccccccccc")
+        );
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .contains("/api/v1/auth/device-session")
+        );
     }
 
     #[test]
@@ -888,7 +927,12 @@ mod tests {
             SessionError::Unavailable
         );
         assert!(client.store.load().unwrap().is_some());
-        assert!(server.join().unwrap().contains("/v1/auth/device-session"));
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .contains("/api/v1/auth/device-session")
+        );
     }
 
     #[test]
@@ -906,6 +950,11 @@ mod tests {
             SessionError::Unauthorized
         );
         assert!(client.store.load().unwrap().is_none());
-        assert!(server.join().unwrap().contains("/v1/auth/device-session"));
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .contains("/api/v1/auth/device-session")
+        );
     }
 }

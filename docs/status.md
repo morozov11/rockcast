@@ -1,10 +1,22 @@
 # RockCast status
 
+## Authenticated voice route (implemented locally, 2026-09-02)
+
+Voice uses one `wss://.../api/v1/voice/stream` endpoint. If the PC has a durable paired session,
+it first renews the short-lived access token through `POST /api/v1/auth/device-session` and sends
+that token with the WebSocket handshake. A failed renewal uses the same endpoint anonymously
+without clearing the durable binding; only the existing revoked-credential handling clears it.
+The namespace and token-renewal regressions are deterministic.
+
+Verified: `cargo fmt --check`, strict Clippy, and `cargo test` (97 unit tests plus non-live
+integration coverage) passed. The matching RockServer API change is local; no deployment or live
+voice request was made.
+
 ## RM-011 device-secret native sessions (implemented locally, 2026-08-30)
 
 RockCast now treats pairing as a durable device binding. The DPAPI-protected credential contains a
 `device_id`, a persistent `device_secret`, and a replaceable access token. On an expired access
-token it calls `POST /v1/auth/device-session`; network and server failures keep the binding, while
+token it calls `POST /api/v1/auth/device-session`; network and server failures keep the binding, while
 only `401 device_credential_invalid` clears it. The legacy refresh-token endpoint and rotating
 refresh-token recovery path are no longer used by this client. This requires the corresponding
 RockServer API change before end-to-end use. Verified: `cargo fmt --check`, strict Clippy, and
@@ -66,7 +78,7 @@ deployment, commit or push was made.
 ## RM-011-E — account and secure session UX (complete, 2026-08-26)
 
 RockCast now has an optional Account & devices dialog. It creates a desktop pairing request via
-the deployed `/v1/pairing-requests` contract, renders the one-time browser deep link as a QR code,
+the deployed `/api/v1/pairing-requests` contract, renders the one-time browser deep link as a QR code,
 and displays the short code and verification phrase. The desktop proof and approval secret remain
 only in process memory. Native access/refresh credentials are stored only in a Windows DPAPI
 protected blob (`session.dpapi`); a DPAPI failure leaves RockCast anonymous/offline rather than
@@ -116,8 +128,8 @@ RockServer metadata supplies a permitted source URL.
 Implemented and locally verified on 2026-08-26.
 
 - Official releases use `https://alex.vault57.ru` without user configuration.
-- Public search uses `POST /v1/search` without Bearer authorization. Voice
-  preserves TLS by mapping HTTPS to WSS and uses `/v1/voice/stream`, also
+- Public search uses `POST /api/v1/search` without Bearer authorization. Voice
+  preserves TLS by mapping HTTPS to WSS and uses `/api/v1/voice/stream`, also
   without Bearer authorization.
 - RockServer URL/token controls and persisted RockServer settings were removed.
   Legacy JSON fields are ignored and scrubbed during settings migration.

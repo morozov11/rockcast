@@ -1,6 +1,6 @@
 //! PCM16 mono resampling for the public RockServer voice contract (16 kHz).
 
-/// Sample rate required by public `/v1/voice/stream`.
+/// Sample rate required by public `/api/v1/voice/stream`.
 pub(super) const VOICE_SAMPLE_RATE_HZ: u32 = 16_000;
 
 /// Stateful linear resampler for mono PCM16 chunks.

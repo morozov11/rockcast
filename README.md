@@ -176,9 +176,9 @@ Typical fields: `volume`, `station_url`, `last_played_station`, `device_id`, `eq
 
 ## RockServer and voice control
 
-Official RockCast releases use the production RockServer at `https://alex.vault57.ru` automatically. Public station search calls `POST /v1/search` without an Authorization header. The window has no RockServer URL or token controls, and these values are not saved in ordinary user settings. RockCast publishes its embedded local catalog first; if the public API is unavailable, it continues with the same local catalog plus Radio Browser fallback and playback remains independent of RockServer.
+Official RockCast releases use the production RockServer at `https://alex.vault57.ru` automatically. Public station search calls `POST /api/v1/search` without an Authorization header. The window has no RockServer URL or token controls, and these values are not saved in ordinary user settings. RockCast publishes its embedded local catalog first; if the public API is unavailable, it continues with the same local catalog plus Radio Browser fallback and playback remains independent of RockServer.
 
-The **Voice** button records PCM16 mono from the default Windows microphone until release or the 60-second limit and connects to public `wss://alex.vault57.ru/v1/voice/stream` without Bearer authorization. HTTPS is always upgraded to WSS, preserving TLS. The official runtime uses the compatible buffered SpeechKit v1 request. Input-device selection/testing and cancellation after upload begins are not implemented yet.
+The **Voice** button records PCM16 mono from the default Windows microphone until release or the 60-second limit and connects to public `wss://alex.vault57.ru/api/v1/voice/stream` without Bearer authorization. HTTPS is always upgraded to WSS, preserving TLS. The official runtime uses the compatible buffered SpeechKit v1 request. Input-device selection/testing and cancellation after upload begins are not implemented yet.
 
 For local development and tests, debug builds alone accept `ROCKCAST_DEV_ROCKSERVER_URL`. A Bearer-protected development server can additionally use `ROCKCAST_DEV_ROCKSERVER_BEARER_TOKEN`, and `ROCKCAST_DEV_ROCKSERVER_VOICE_MODE=streaming_v3` selects streaming capture. These runtime-only overrides are ignored by release builds, never written to settings, never shown in the UI, and their values are not logged.
 

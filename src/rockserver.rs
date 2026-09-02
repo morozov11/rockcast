@@ -86,7 +86,7 @@ pub(crate) fn search(
         .build()
         .map_err(|_| "RockServer HTTP client failed".to_owned())?;
     let mut request = client
-        .post(format!("{base}/v1/search"))
+        .post(format!("{base}/api/v1/search"))
         .json(&SearchRequest {
             query,
             locale,
@@ -197,7 +197,7 @@ mod tests {
         let config = RuntimeConfig::for_test(base_url, None);
         assert!(search(&config, "rock", "en").unwrap().is_empty());
         let request = server.join().unwrap().to_ascii_lowercase();
-        assert!(request.starts_with("post /v1/search http/1.1\r\n"));
+        assert!(request.starts_with("post /api/v1/search http/1.1\r\n"));
         assert!(!request.contains("authorization:"));
     }
 
@@ -207,7 +207,7 @@ mod tests {
         let config = RuntimeConfig::for_test(base_url, Some("dev-test-token"));
         assert!(search(&config, "", "ru").unwrap().is_empty());
         let request = server.join().unwrap().to_ascii_lowercase();
-        assert!(request.starts_with("post /v1/search http/1.1\r\n"));
+        assert!(request.starts_with("post /api/v1/search http/1.1\r\n"));
         assert!(request.contains("authorization: bearer dev-test-token\r\n"));
     }
 

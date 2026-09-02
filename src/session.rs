@@ -2,15 +2,29 @@
 use crate::{rockserver::RuntimeConfig, settings};
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf, sync::Mutex, time::Duration};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// Serializes access-token issuance within one RockCast process.
 static SESSION_MUTEX: Mutex<()> = Mutex::new(());
+const ACCESS_TOKEN_REFRESH_LEAD: Duration = Duration::from_secs(120);
+
+fn access_token_needs_refresh(access_expires_at: &str) -> bool {
+    if access_expires_at.is_empty() {
+        return true;
+    }
+    let Ok(expires_at) = OffsetDateTime::parse(access_expires_at, &Rfc3339) else {
+        return true;
+    };
+    expires_at - OffsetDateTime::now_utc()
+        <= time::Duration::seconds(ACCESS_TOKEN_REFRESH_LEAD.as_secs() as i64)
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct NativeCredentials {
     device_id: String,
     device_secret: String,
     access_token: String,
+    access_expires_at: String,
 }
 
 impl NativeCredentials {
@@ -18,6 +32,7 @@ impl NativeCredentials {
         device_id: String,
         device_secret: String,
         access_token: String,
+        access_expires_at: String,
     ) -> Result<Self, SessionError> {
         if device_id.is_empty() || device_secret.len() < 32 || access_token.len() < 16 {
             return Err(SessionError::Rejected);
@@ -26,10 +41,14 @@ impl NativeCredentials {
             device_id,
             device_secret,
             access_token,
+            access_expires_at,
         })
     }
     pub(crate) fn access_token(&self) -> &str {
         &self.access_token
+    }
+    fn access_expires_at(&self) -> &str {
+        &self.access_expires_at
     }
     fn device_id(&self) -> &str {
         &self.device_id
@@ -93,6 +112,8 @@ struct StoredCredentials {
     device_id: String,
     device_secret: String,
     access_token: String,
+    #[serde(default)]
+    access_expires_at: String,
 }
 #[derive(Deserialize)]
 struct LegacyStoredCredentials {
@@ -104,11 +125,13 @@ struct LegacyStoredCredentials {
 #[derive(Deserialize)]
 struct DeviceSession {
     access_token: String,
+    access_expires_at: String,
 }
 #[derive(Deserialize)]
 struct Completion {
     device_id: String,
     access_token: String,
+    access_expires_at: String,
     device_secret: String,
     account_display_name: String,
     device_display_name: String,
@@ -203,6 +226,7 @@ fn decode_credentials(plain: &[u8]) -> Result<Option<NativeCredentials>, Session
             credentials.device_id,
             credentials.device_secret,
             credentials.access_token,
+            credentials.access_expires_at,
         )
         .map(Some),
         Err(_) if serde_json::from_slice::<LegacyStoredCredentials>(plain).is_ok() => Ok(None),
@@ -216,6 +240,7 @@ fn write_credentials(path: &PathBuf, credentials: &NativeCredentials) -> Result<
         device_id: credentials.device_id.clone(),
         device_secret: credentials.device_secret.clone(),
         access_token: credentials.access_token.clone(),
+        access_expires_at: credentials.access_expires_at.clone(),
     })
     .map_err(|_| SessionError::SecureStorageUnavailable)?;
     let encrypted = dpapi(true, &plain)?;
@@ -260,6 +285,7 @@ impl CredentialStore for OsCredentialStore {
         if persisted.device_secret() != credentials.device_secret()
             || persisted.device_id() != credentials.device_id()
             || persisted.access_token() != credentials.access_token()
+            || persisted.access_expires_at() != credentials.access_expires_at()
         {
             return Err(SessionError::SecureStorageUnavailable);
         }
@@ -447,6 +473,7 @@ impl<S: CredentialStore> AccountClient<S> {
             result.device_id.clone(),
             result.device_secret,
             result.access_token,
+            result.access_expires_at,
         )
         .map_err(|_| PairingPoll::Expired)?;
         Ok((
@@ -513,6 +540,7 @@ impl<S: CredentialStore> AccountClient<S> {
             current.device_id,
             current.device_secret,
             session.access_token,
+            session.access_expires_at,
         )
         .and_then(|new| {
             self.store.save(&new).map(|_| {
@@ -520,10 +548,18 @@ impl<S: CredentialStore> AccountClient<S> {
             })
         })
     }
+    fn ensure_fresh_access_token_without_lock(&self) -> Result<NativeCredentials, SessionError> {
+        let credentials = self.store.load()?.ok_or(SessionError::Rejected)?;
+        if !access_token_needs_refresh(credentials.access_expires_at()) {
+            return Ok(credentials);
+        }
+        self.issue_device_session_without_lock()?;
+        self.store.load()?.ok_or(SessionError::Rejected)
+    }
     pub(crate) fn has_credentials(&self) -> Result<bool, SessionError> {
         Ok(self.store.load()?.is_some())
     }
-    /// Returns a renewed native access token for an authenticated voice session.
+    /// Returns a still-valid native access token for an authenticated voice session.
     pub(crate) fn voice_access_token(&self) -> Result<Option<String>, SessionError> {
         let _guard = SESSION_MUTEX
             .lock()
@@ -531,11 +567,8 @@ impl<S: CredentialStore> AccountClient<S> {
         if !self.has_credentials()? {
             return Ok(None);
         }
-        self.issue_device_session_without_lock()?;
-        Ok(self
-            .store
-            .load()?
-            .map(|credentials| credentials.access_token().to_owned()))
+        self.ensure_fresh_access_token_without_lock()
+            .map(|credentials| Some(credentials.access_token().to_owned()))
     }
     fn authorized(
         &self,
@@ -564,6 +597,7 @@ impl<S: CredentialStore> AccountClient<S> {
         if !self.has_credentials()? {
             return Ok(None);
         }
+        let _credentials = self.ensure_fresh_access_token_without_lock()?;
         match self
             .profile()
             .and_then(|profile| self.devices().map(|devices| Some((profile, devices))))
@@ -647,10 +681,41 @@ mod tests {
             Ok(())
         }
     }
+    const FRESH_ACCESS_EXPIRES_AT: &str = "2030-01-01T12:00:00Z";
+
+    fn stored_credentials(access_token: &str) -> NativeCredentials {
+        NativeCredentials::new(
+            "device".into(),
+            "b".repeat(43),
+            access_token.into(),
+            FRESH_ACCESS_EXPIRES_AT.into(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn access_token_needs_refresh_only_when_unknown_or_near_expiry() {
+        assert!(!access_token_needs_refresh(FRESH_ACCESS_EXPIRES_AT));
+        assert!(!access_token_needs_refresh("2030-01-01T12:00:00.123456Z"));
+        assert!(access_token_needs_refresh(""));
+        assert!(access_token_needs_refresh(
+            &OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn legacy_stored_credentials_without_expiry_still_load() {
+        let legacy = br#"{"device_id":"device","device_secret":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","access_token":"aaaaaaaaaaaaaaaa"}"#;
+        let credentials = decode_credentials(legacy).unwrap().expect("legacy session");
+        assert_eq!(credentials.access_expires_at(), "");
+        assert!(access_token_needs_refresh(credentials.access_expires_at()));
+    }
+
     #[test]
     fn secrets_do_not_format_or_serialize() {
-        let credentials =
-            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap();
+        let credentials = stored_credentials("a".repeat(16).as_str());
         let store = Memory(Mutex::new(Some(credentials)));
         assert_eq!(store.load().unwrap().unwrap().access_token().len(), 16);
     }
@@ -787,7 +852,7 @@ mod tests {
 
     #[test]
     fn completed_pairing_saves_only_to_secure_store_seam() {
-        let body = r#"{"user_id":"must-not-be-used","device_id":"device","session_id":"session","access_token":"aaaaaaaaaaaaaaaa","device_secret":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","account_display_name":"Alex's Rock account","device_display_name":"RockCast — test","device_type":"windows"}"#;
+        let body = r#"{"user_id":"must-not-be-used","device_id":"device","session_id":"session","access_token":"aaaaaaaaaaaaaaaa","access_expires_at":"2030-01-01T12:00:00Z","device_secret":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","account_display_name":"Alex's Rock account","device_display_name":"RockCast — test","device_type":"windows"}"#;
         let (url, server) = server(200, body);
         let store = Memory(Mutex::new(None));
         let pairing = PairingRequest {
@@ -875,10 +940,11 @@ mod tests {
 
     #[test]
     fn device_session_reuses_the_durable_credential() {
-        let (url, server) = server(200, r#"{"access_token":"cccccccccccccccc"}"#);
-        let store = Memory(Mutex::new(Some(
-            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
-        )));
+        let (url, server) = server(
+            200,
+            r#"{"access_token":"cccccccccccccccc","access_expires_at":"2030-01-01T12:00:00Z"}"#,
+        );
+        let store = Memory(Mutex::new(Some(stored_credentials("a".repeat(16).as_str()))));
         let client = client(url, store);
         let _guard = SESSION_MUTEX
             .lock()
@@ -894,10 +960,32 @@ mod tests {
     }
 
     #[test]
-    fn voice_access_token_renews_the_paired_session() {
-        let (url, server) = server(200, r#"{"access_token":"cccccccccccccccc"}"#);
+    fn voice_access_token_reuses_fresh_session_without_renewal() {
+        let store = Memory(Mutex::new(Some(stored_credentials("fresh-access-token"))));
+        let client = client("http://127.0.0.1:9".into(), store);
+        assert_eq!(
+            client.voice_access_token().unwrap().as_deref(),
+            Some("fresh-access-token")
+        );
+    }
+
+    #[test]
+    fn voice_access_token_renews_when_expiry_is_near() {
+        let (url, server) = server(
+            200,
+            r#"{"access_token":"cccccccccccccccc","access_expires_at":"2030-01-01T12:00:00Z"}"#,
+        );
+        let near_expiry = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap();
         let store = Memory(Mutex::new(Some(
-            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
+            NativeCredentials::new(
+                "device".into(),
+                "b".repeat(43),
+                "a".repeat(16),
+                near_expiry,
+            )
+            .unwrap(),
         )));
         let client = client(url, store);
         assert_eq!(
@@ -915,9 +1003,7 @@ mod tests {
     #[test]
     fn unavailable_device_session_keeps_local_credentials() {
         let (url, server) = server(500, "{}");
-        let store = Memory(Mutex::new(Some(
-            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
-        )));
+        let store = Memory(Mutex::new(Some(stored_credentials("a".repeat(16).as_str()))));
         let client = client(url, store);
         let _guard = SESSION_MUTEX
             .lock()
@@ -938,9 +1024,7 @@ mod tests {
     #[test]
     fn invalid_device_credential_clears_local_credentials() {
         let (url, server) = server(401, r#"{"code":"device_credential_invalid"}"#);
-        let store = Memory(Mutex::new(Some(
-            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16)).unwrap(),
-        )));
+        let store = Memory(Mutex::new(Some(stored_credentials("a".repeat(16).as_str()))));
         let client = client(url, store);
         let _guard = SESSION_MUTEX
             .lock()

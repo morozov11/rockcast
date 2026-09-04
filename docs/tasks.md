@@ -1,5 +1,17 @@
 # RockCast tasks
 
+## DC-012 — registered player transport (local implementation, 2026-09-04)
+
+- Reused the existing paired native credential and device-session renewal; no new identity, pairing,
+  token, or credential store was introduced.
+- Added the bounded control-plane connection lifecycle, truthful player manifest/state publication,
+  registration/reconnect snapshot resync, and safe malformed/unknown-frame handling.
+- Deferred exactly to DC-013: parsing or executing `device.command`, command lifecycle results, and
+  state confirmation after remote actions. Chromecast/relay/display/voice/HA stay absent from the
+  manifest.
+- Remaining acceptance blocker: run a real RockCast-to-deployed-RockServer device-control E2E smoke
+  after the target endpoint is available; local playback fallback must be observed there too.
+
 ## Voice route selection — 2026-09-02
 
 - Goal: keep anonymous voice usable while sending paired RockCast voice sessions with a current

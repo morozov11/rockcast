@@ -1,8 +1,9 @@
-//! RockCast library (GUI binary is `main.rs`).
+//! RockCast library (GUI binary is `main.rs`). See the [source map](ARCHITECTURE.md).
 
 pub mod app;
 pub mod audio;
 pub mod cast;
+pub(crate) mod device_control;
 pub mod i18n;
 pub mod local;
 pub mod net;

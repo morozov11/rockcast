@@ -18,6 +18,7 @@ use std::{
 use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke, TextureHandle, Vec2};
 
 use crate::{
+    device_control::{DeviceControlClient, PlayerState},
     i18n::Lang,
     observers::{BANDS, StreamObservers},
     output::OutputDevice,
@@ -134,6 +135,7 @@ pub struct RockCastApp {
     pub(super) bootstrapped: bool,
     pub(super) lang: Lang,
     pub(super) rockserver: RuntimeConfig,
+    pub(super) device_control: DeviceControlClient,
     pub(super) telemetry: Telemetry,
     pub(super) eq_repaint_next: Instant,
     /// UI-owned decoded textures. Fetch/decode stays in the BackgroundRuntime.
@@ -175,6 +177,8 @@ impl RockCastApp {
         let lang = settings.language;
         let rockserver = RuntimeConfig::for_app();
         log::info!("RockServer configuration loaded");
+        let device_control =
+            DeviceControlClient::new(rockserver.clone(), settings.device_control_state_revision);
         let last_played_station = settings.last_played_station.clone();
         let t = lang.t();
 
@@ -235,6 +239,7 @@ impl RockCastApp {
             bootstrapped: false,
             lang,
             rockserver,
+            device_control,
             telemetry: Telemetry::new(),
             eq_repaint_next: Instant::now(),
             station_icons: HashMap::new(),
@@ -256,6 +261,7 @@ impl eframe::App for RockCastApp {
         self.poll_messages(ctx);
         self.poll_pairing();
         self.apply_volume_if_needed();
+        self.sync_device_control_state();
         if self.playing
             && self.playback.relay_active()
             && !self.playing_local
@@ -419,6 +425,7 @@ impl eframe::App for RockCastApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         log::info!("on_exit: shutting down");
+        self.device_control.shutdown();
         self.shutdown_playback();
         // HTTP decode threads may still be blocked inside reqwest; don't let them
         // keep the process alive after the window is gone.
@@ -428,11 +435,41 @@ impl eframe::App for RockCastApp {
 
 impl Drop for RockCastApp {
     fn drop(&mut self) {
+        self.device_control.shutdown();
         self.shutdown_playback();
     }
 }
 
 impl RockCastApp {
+    fn sync_device_control_state(&mut self) {
+        let playback_status = if self.playing {
+            "playing"
+        } else if matches!(
+            self.playback.phase(),
+            crate::playback::PlaybackPhase::Failed { .. }
+        ) {
+            "error"
+        } else {
+            "idle"
+        };
+        let state = PlayerState {
+            playback_status,
+            station_id: self
+                .playing
+                .then(|| {
+                    self.last_played_station
+                        .as_ref()
+                        .map(|station| station.id.clone())
+                })
+                .flatten(),
+            volume: self.volume,
+        };
+        if let Some(revision) = self.device_control.publish(state) {
+            self.settings.device_control_state_revision = revision;
+            self.settings_dirty = true;
+        }
+    }
+
     pub(in crate::app) fn account_menu_label(&self) -> String {
         let t = self.lang.t();
         if account_session_active(&self.account_state) {

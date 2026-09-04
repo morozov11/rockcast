@@ -1,5 +1,29 @@
 # RockCast status
 
+## Structural refactor (2026-09-04)
+
+The DC-012 device-control implementation is now split by lifecycle, v1 wire protocol,
+tungstenite transport, and regression tests while preserving its existing public module path.
+This is behavior-preserving only; deployed-control-plane E2E acceptance remains unverified.
+
+## DC-012 — RockServer registered player (local implementation, 2026-09-04)
+
+RockCast now reuses its existing DPAPI-protected `device_id` and durable device secret to renew a
+native access token through `POST /api/v1/auth/device-session`, then maintains one bounded WSS
+device-control v1 loop at `/api/v1/devices/connect`. It registers only as a `player`, publishes
+only local playback/station and volume facts, sends a full snapshot after every registration or
+resync, heartbeats every 20 seconds, and reconnects with bounded deterministic jitter. Local radio
+playback remains independent when the server, token renewal, or WSS is unavailable; a revoked
+credential is handled by the existing session renewal path.
+
+The v1 assumptions are `hello → welcome → register → registered → state_full`, 65,536-byte frames,
+61,440-byte payloads, and server-derived identity (no identity or secret is sent in protocol
+messages). The manifest intentionally excludes Chromecast, relay, display, voice, Home Assistant,
+and mute. DC-013 still owns inbound `device.command` execution, acknowledgements/results, and
+post-command state confirmation; DC-012 safely ignores such frames. Local unit/compile checks are
+recorded with this change; live deployed-control-plane E2E remains unverified, so this is not marked
+as full acceptance complete.
+
 ## Authenticated voice route (implemented locally, 2026-09-02)
 
 Voice uses one `wss://.../api/v1/voice/stream` endpoint. If the PC has a durable paired session,

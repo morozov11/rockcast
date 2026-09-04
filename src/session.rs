@@ -570,6 +570,28 @@ impl<S: CredentialStore> AccountClient<S> {
         self.ensure_fresh_access_token_without_lock()
             .map(|credentials| Some(credentials.access_token().to_owned()))
     }
+
+    /// Returns a native-session token for device-control without creating a
+    /// second credential or pairing flow. A rejected WebSocket handshake may
+    /// request one forced renewal before the caller backs off.
+    pub(crate) fn device_control_access_token(
+        &self,
+        force_renewal: bool,
+    ) -> Result<Option<String>, SessionError> {
+        let _guard = SESSION_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.has_credentials()? {
+            return Ok(None);
+        }
+        let credentials = if force_renewal {
+            self.issue_device_session_without_lock()?;
+            self.store.load()?.ok_or(SessionError::Rejected)?
+        } else {
+            self.ensure_fresh_access_token_without_lock()?
+        };
+        Ok(Some(credentials.access_token().to_owned()))
+    }
     fn authorized(
         &self,
         method: reqwest::Method,
@@ -699,9 +721,7 @@ mod tests {
         assert!(!access_token_needs_refresh("2030-01-01T12:00:00.123456Z"));
         assert!(access_token_needs_refresh(""));
         assert!(access_token_needs_refresh(
-            &OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap()
+            &OffsetDateTime::now_utc().format(&Rfc3339).unwrap()
         ));
     }
 
@@ -944,7 +964,9 @@ mod tests {
             200,
             r#"{"access_token":"cccccccccccccccc","access_expires_at":"2030-01-01T12:00:00Z"}"#,
         );
-        let store = Memory(Mutex::new(Some(stored_credentials("a".repeat(16).as_str()))));
+        let store = Memory(Mutex::new(Some(stored_credentials(
+            "a".repeat(16).as_str(),
+        ))));
         let client = client(url, store);
         let _guard = SESSION_MUTEX
             .lock()
@@ -970,22 +992,48 @@ mod tests {
     }
 
     #[test]
+    fn device_control_reuses_the_stored_pairing_identity() {
+        let store = Memory(Mutex::new(Some(stored_credentials("fresh-access-token"))));
+        let client = client("http://127.0.0.1:9".into(), store);
+        assert_eq!(
+            client
+                .device_control_access_token(false)
+                .unwrap()
+                .as_deref(),
+            Some("fresh-access-token")
+        );
+    }
+
+    #[test]
+    fn device_control_can_force_the_existing_session_renewal() {
+        let (url, server) = server(
+            200,
+            r#"{"access_token":"cccccccccccccccc","access_expires_at":"2030-01-01T12:00:00Z"}"#,
+        );
+        let store = Memory(Mutex::new(Some(stored_credentials("fresh-access-token"))));
+        let client = client(url, store);
+        assert_eq!(
+            client.device_control_access_token(true).unwrap().as_deref(),
+            Some("cccccccccccccccc")
+        );
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .contains("/api/v1/auth/device-session")
+        );
+    }
+
+    #[test]
     fn voice_access_token_renews_when_expiry_is_near() {
         let (url, server) = server(
             200,
             r#"{"access_token":"cccccccccccccccc","access_expires_at":"2030-01-01T12:00:00Z"}"#,
         );
-        let near_expiry = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap();
+        let near_expiry = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
         let store = Memory(Mutex::new(Some(
-            NativeCredentials::new(
-                "device".into(),
-                "b".repeat(43),
-                "a".repeat(16),
-                near_expiry,
-            )
-            .unwrap(),
+            NativeCredentials::new("device".into(), "b".repeat(43), "a".repeat(16), near_expiry)
+                .unwrap(),
         )));
         let client = client(url, store);
         assert_eq!(
@@ -1003,7 +1051,9 @@ mod tests {
     #[test]
     fn unavailable_device_session_keeps_local_credentials() {
         let (url, server) = server(500, "{}");
-        let store = Memory(Mutex::new(Some(stored_credentials("a".repeat(16).as_str()))));
+        let store = Memory(Mutex::new(Some(stored_credentials(
+            "a".repeat(16).as_str(),
+        ))));
         let client = client(url, store);
         let _guard = SESSION_MUTEX
             .lock()
@@ -1024,7 +1074,9 @@ mod tests {
     #[test]
     fn invalid_device_credential_clears_local_credentials() {
         let (url, server) = server(401, r#"{"code":"device_credential_invalid"}"#);
-        let store = Memory(Mutex::new(Some(stored_credentials("a".repeat(16).as_str()))));
+        let store = Memory(Mutex::new(Some(stored_credentials(
+            "a".repeat(16).as_str(),
+        ))));
         let client = client(url, store);
         let _guard = SESSION_MUTEX
             .lock()

@@ -25,6 +25,7 @@ impl RockCastApp {
             self.playing_local
         );
         self.shutting_down = true;
+        self.device_control.shutdown();
         self.observers.stop();
         self.playing = false;
         self.playing_local = false;

@@ -28,6 +28,9 @@ pub struct AppSettings {
     pub last_played_station: Option<crate::stations::Station>,
     #[serde(default)]
     pub device_id: Option<String>,
+    /// Last device-control snapshot revision accepted by this RockCast identity.
+    #[serde(default)]
+    pub device_control_state_revision: u64,
     /// Parallel stream analysis for the visualizer (extra traffic).
     #[serde(default)]
     pub eq_enabled: bool,

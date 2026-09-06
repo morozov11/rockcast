@@ -37,6 +37,7 @@ impl RockCastApp {
         }
         while let Some(event) = self.playback.try_event() {
             if !self.playback.apply_event(&event) {
+                self.finish_stale_remote_command();
                 log::debug!("stale playback event ignored");
                 continue;
             }
@@ -74,8 +75,9 @@ impl RockCastApp {
                     {
                         self.schedule_stream_tap(generation, tap_url);
                     }
+                    self.finish_remote_command(generation, true);
                 }
-                PlaybackEvent::StopOk { .. } => {
+                PlaybackEvent::StopOk { generation } => {
                     self.playing_op = false;
                     self.playing = false;
                     self.playing_local = false;
@@ -83,8 +85,12 @@ impl RockCastApp {
                     self.observers.stop();
                     self.track = self.lang.t().stopped.into();
                     self.status = self.lang.t().stopped.into();
+                    self.finish_remote_command(generation, true);
                 }
-                PlaybackEvent::Error { message, .. } => {
+                PlaybackEvent::Error {
+                    message,
+                    generation,
+                } => {
                     if is_station_unavailable_error(&message) {
                         crate::voice_prompts::play(
                             crate::voice_prompts::Prompt::StationUnavailable,
@@ -124,6 +130,7 @@ impl RockCastApp {
                     } else {
                         self.status = message;
                     }
+                    self.finish_remote_command(generation, false);
                 }
             }
         }
@@ -451,6 +458,46 @@ impl RockCastApp {
                     }
                 }
             }
+        }
+    }
+
+    fn finish_remote_command(&mut self, generation: u64, succeeded: bool) {
+        let Some(pending) = self.pending_remote_command.take() else {
+            return;
+        };
+        if pending.generation != generation {
+            self.pending_remote_command = Some(pending);
+            return;
+        }
+        self.device_control.complete_command(
+            &pending.id,
+            if succeeded {
+                crate::device_control::CommandResult::succeeded()
+            } else {
+                // The v1 error enum lacks an execution_failed value.  A failed
+                // command is still terminal; no optimistic state is published.
+                crate::device_control::CommandResult::failed(
+                    "command_timeout",
+                    "Playback failed or was interrupted",
+                )
+            },
+        );
+    }
+
+    fn finish_stale_remote_command(&mut self) {
+        if self
+            .pending_remote_command
+            .as_ref()
+            .is_some_and(|pending| pending.generation != self.playback.current_generation())
+            && let Some(pending) = self.pending_remote_command.take()
+        {
+            self.device_control.complete_command(
+                &pending.id,
+                crate::device_control::CommandResult::failed(
+                    "command_timeout",
+                    "Command was interrupted",
+                ),
+            );
         }
     }
 }

@@ -9,20 +9,19 @@
 | `local/`, `cast/`, `relay/`, `audio/` | output adapters and stream transport/decoding |
 | `stations/`, `personal_data.rs`, `settings.rs` | catalog and durable local user data |
 | `session.rs`, `rockserver.rs`, `voice/` | paired identity and RockServer HTTP/WSS clients |
-| `device_control.rs` | DC-012 player registration lifecycle; `device_control/protocol.rs` owns v1 JSON, `transport.rs` owns tungstenite, and `tests.rs` holds its regression coverage |
+| `device_control.rs` | DC-012 registration plus DC-013 bounded command lifecycle; `device_control/protocol.rs` owns v1 JSON, `transport.rs` owns tungstenite, and `tests.rs` holds its regression coverage |
 
 ## Dependency direction
 
 `main → app → playback → {local, cast, relay}`. `app` may use settings, catalog,
 session, and device-control; protocol and output adapters must not depend on egui.
-`device_control` may depend on `session` and `rockserver`, but never on app or playback.
+`device_control` may depend on `session` and `rockserver`, but never on app or playback. It hands parsed, locally capability-checked commands through a bounded process-local queue; `app` remains the sole `PlaybackController` owner and reports the observed terminal outcome back to the client.
 
 ## Lifecycle and reading order
 
 Start with `lib.rs`, `main.rs`, then `app/mod.rs` and `playback/mod.rs`; follow the selected
 output adapter. For paired features read `session.rs` before `voice/` or `device_control.rs`.
-The device-control loop is `DeviceControlClient::new → publish → shutdown`; it reuses the
-existing paired credentials, publishes facts only, and does not execute DC-013 commands.
+The device-control loop is `DeviceControlClient::new → publish/take_command/complete_command → shutdown`; it reuses the existing paired credentials, executes no playback on its worker thread, and emits a terminal result only after the UI-owned controller reports an actual outcome.
 
 ## Tests
 

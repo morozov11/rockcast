@@ -1,8 +1,65 @@
 //! Play, stop, shutdown, and observer wiring.
 
-use crate::voice::VoiceControl;
+use crate::{
+    device_control::{CommandResult, PlayerCommand},
+    voice::VoiceControl,
+};
 
 use super::super::RockCastApp;
+
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteCommandPlan {
+    PlaySelected,
+    Stop,
+    PlayRelative(isize),
+    PlayStation(usize),
+    SetVolume(u8),
+}
+
+fn plan_remote_command(
+    command: &PlayerCommand,
+    stations: &[crate::stations::Station],
+    selected_station: Option<usize>,
+    volume: u8,
+) -> Result<RemoteCommandPlan, CommandResult> {
+    let unavailable = || {
+        CommandResult::failed(
+            "invalid_payload",
+            "Command cannot be applied to local playback state",
+        )
+    };
+    match command {
+        PlayerCommand::Play => Ok(RemoteCommandPlan::PlaySelected),
+        PlayerCommand::Stop => Ok(RemoteCommandPlan::Stop),
+        PlayerCommand::Next => selected_station
+            .and_then(|current| current.checked_add(1))
+            .filter(|next| *next < stations.len())
+            .map(|_| RemoteCommandPlan::PlayRelative(1))
+            .ok_or_else(unavailable),
+        PlayerCommand::Previous => selected_station
+            .and_then(|current| current.checked_sub(1))
+            .map(|_| RemoteCommandPlan::PlayRelative(-1))
+            .ok_or_else(unavailable),
+        PlayerCommand::PlayStation { station_id } => stations
+            .iter()
+            .position(|station| station.id == *station_id)
+            .map(RemoteCommandPlan::PlayStation)
+            .ok_or_else(unavailable),
+        PlayerCommand::PlayStream { stream_uri } => stations
+            .iter()
+            .position(|station| station.url == *stream_uri)
+            .map(RemoteCommandPlan::PlayStation)
+            .ok_or_else(unavailable),
+        PlayerCommand::SetVolume { level } => Ok(RemoteCommandPlan::SetVolume(*level)),
+        PlayerCommand::ChangeVolume { delta } => Ok(RemoteCommandPlan::SetVolume(
+            (i16::from(volume) + i16::from(*delta)).clamp(0, 100) as u8,
+        )),
+        PlayerCommand::Pause | PlayerCommand::SetMute { .. } => Err(CommandResult::failed(
+            "capability_not_supported",
+            "Command is not supported by this player",
+        )),
+    }
+}
 
 impl RockCastApp {
     pub(in crate::app) fn queue_volume(&self) {
@@ -38,7 +95,7 @@ impl RockCastApp {
         log::info!("shutdown_playback: finished");
     }
 
-    pub(in crate::app) fn play(&mut self) {
+    pub(in crate::app) fn play(&mut self) -> Option<u64> {
         if !self.can_start_play() {
             log::debug!(
                 "play blocked: loading_devices={} devices={} selected_device={:?} selected_station={:?}",
@@ -47,7 +104,7 @@ impl RockCastApp {
                 self.selected_device,
                 self.selected_station
             );
-            return;
+            return None;
         }
         let Some(station) = self
             .selected_station
@@ -55,7 +112,7 @@ impl RockCastApp {
             .cloned()
         else {
             self.status = self.lang.t().pick_station.into();
-            return;
+            return None;
         };
         let Some(device) = self
             .selected_device
@@ -63,7 +120,7 @@ impl RockCastApp {
             .cloned()
         else {
             self.status = self.lang.t().pick_device.into();
-            return;
+            return None;
         };
         let local = device.is_local();
         self.observers.stop();
@@ -76,18 +133,18 @@ impl RockCastApp {
         self.track = self.lang.t().connecting.into();
         self.mark_settings_dirty();
         self.persist_settings_if_needed(true);
-        self.playback.play(
+        Some(self.playback.play(
             station,
             device,
             self.volume,
             self.cast_relay && !local,
             self.eq_enabled,
-        );
+        ))
     }
 
-    pub(in crate::app) fn stop(&mut self) {
+    pub(in crate::app) fn stop(&mut self) -> Option<u64> {
         if self.shutting_down {
-            return;
+            return None;
         }
         self.playing_op = true;
         self.status = "Stop…".into();
@@ -98,7 +155,78 @@ impl RockCastApp {
         self.playing_local = false;
         self.playing_url = None;
         self.track = self.lang.t().stopped.into();
-        self.playback.stop();
+        Some(self.playback.stop())
+    }
+
+    pub(in crate::app) fn poll_device_control_commands(&mut self) {
+        while let Some(command) = self.device_control.take_command() {
+            let command_id = command.id;
+            let plan = match plan_remote_command(
+                &command.command,
+                &self.stations,
+                self.selected_station,
+                self.volume,
+            ) {
+                Ok(plan) => plan,
+                Err(result) => {
+                    self.device_control.complete_command(&command_id, result);
+                    continue;
+                }
+            };
+            let generation = match plan {
+                RemoteCommandPlan::PlaySelected => self.play(),
+                RemoteCommandPlan::Stop => self.stop(),
+                RemoteCommandPlan::PlayRelative(offset) => self.play_remote_relative(offset),
+                RemoteCommandPlan::PlayStation(index) => {
+                    self.selected_station = Some(index);
+                    self.scroll_to_station = Some(index);
+                    self.voice_fallback.clear();
+                    self.play()
+                }
+                RemoteCommandPlan::SetVolume(level) => {
+                    self.volume = level;
+                    self.queue_volume();
+                    self.mark_settings_dirty();
+                    self.persist_settings_if_needed(true);
+                    self.device_control
+                        .complete_command(&command_id, CommandResult::succeeded());
+                    continue;
+                }
+            };
+            if let Some(generation) = generation {
+                if let Some(previous) =
+                    self.pending_remote_command
+                        .replace(super::super::PendingRemoteCommand {
+                            id: command_id,
+                            generation,
+                        })
+                {
+                    self.device_control.complete_command(
+                        &previous.id,
+                        CommandResult::failed("command_timeout", "Command was interrupted"),
+                    );
+                }
+            } else {
+                self.device_control.complete_command(
+                    &command_id,
+                    CommandResult::failed(
+                        "invalid_payload",
+                        "Command cannot be applied to local playback state",
+                    ),
+                );
+            }
+        }
+    }
+
+    fn play_remote_relative(&mut self, offset: isize) -> Option<u64> {
+        let current = self.selected_station?;
+        let next = current
+            .checked_add_signed(offset)
+            .filter(|next| *next < self.stations.len())?;
+        self.selected_station = Some(next);
+        self.scroll_to_station = Some(next);
+        self.voice_fallback.clear();
+        self.play()
     }
 
     pub(in crate::app) fn apply_voice_control(&mut self, control: VoiceControl) {
@@ -197,5 +325,98 @@ impl RockCastApp {
             tap,
             relay_url.as_deref(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn station(id: &str, url: &str) -> crate::stations::Station {
+        crate::stations::Station::from_primary(
+            id.into(),
+            id.into(),
+            url.into(),
+            String::new(),
+            String::new(),
+            128,
+            "mp3".into(),
+        )
+    }
+
+    #[derive(Default)]
+    struct FakePlayback {
+        calls: Vec<RemoteCommandPlan>,
+    }
+
+    impl FakePlayback {
+        fn apply(&mut self, plan: RemoteCommandPlan) {
+            self.calls.push(plan);
+        }
+    }
+
+    #[test]
+    fn remote_commands_map_once_to_existing_playback_operations() {
+        let stations = [
+            station("first", "https://catalog.test/first"),
+            station("second", "https://catalog.test/second"),
+        ];
+        let commands = [
+            (PlayerCommand::Play, RemoteCommandPlan::PlaySelected),
+            (PlayerCommand::Stop, RemoteCommandPlan::Stop),
+            (PlayerCommand::Next, RemoteCommandPlan::PlayRelative(1)),
+            (PlayerCommand::Previous, RemoteCommandPlan::PlayRelative(-1)),
+            (
+                PlayerCommand::PlayStation {
+                    station_id: "second".into(),
+                },
+                RemoteCommandPlan::PlayStation(1),
+            ),
+            (
+                PlayerCommand::PlayStream {
+                    stream_uri: "https://catalog.test/first".into(),
+                },
+                RemoteCommandPlan::PlayStation(0),
+            ),
+            (
+                PlayerCommand::SetVolume { level: 77 },
+                RemoteCommandPlan::SetVolume(77),
+            ),
+            (
+                PlayerCommand::ChangeVolume { delta: 20 },
+                RemoteCommandPlan::SetVolume(70),
+            ),
+        ];
+        let mut playback = FakePlayback::default();
+        for (command, expected) in commands {
+            let selected = if matches!(&command, PlayerCommand::Previous) {
+                Some(1)
+            } else {
+                Some(0)
+            };
+            let plan = plan_remote_command(&command, &stations, selected, 50).unwrap();
+            assert_eq!(plan, expected);
+            playback.apply(plan);
+        }
+        assert_eq!(playback.calls.len(), 8);
+    }
+
+    #[test]
+    fn remote_command_failures_do_not_create_a_playback_operation() {
+        let stations = [station("known", "https://catalog.test/known")];
+        for command in [
+            PlayerCommand::Next,
+            PlayerCommand::Previous,
+            PlayerCommand::PlayStation {
+                station_id: "missing".into(),
+            },
+            PlayerCommand::PlayStream {
+                stream_uri: "https://untrusted.test/stream".into(),
+            },
+            PlayerCommand::Pause,
+            PlayerCommand::SetMute { muted: true },
+        ] {
+            assert!(plan_remote_command(&command, &stations, None, 50).is_err());
+        }
     }
 }

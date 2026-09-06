@@ -67,6 +67,178 @@ fn protocol_parser_rejects_malformed_and_oversized_frames() {
     );
 }
 
+fn command_frame(command_id: &str, device_id: &str, body: Value) -> String {
+    json!({
+        "protocol_version": 1,
+        "message_id": "00000000-0000-4000-8000-000000000001",
+        "type": "device.command",
+        "sent_at": "2026-09-04T00:00:00Z",
+        "payload": { "command_id": command_id, "target": { "device_id": device_id }, "body": body }
+    })
+    .to_string()
+}
+
+#[test]
+fn commands_are_strictly_bounded_and_catalog_only() {
+    let command_id = "00000000-0000-4000-8000-000000000002";
+    let device_id = "00000000-0000-4000-8000-000000000003";
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                device_id,
+                json!({"name":"station.play_station","station_id":"somafm-metal-detector"})
+            ),
+            Some(device_id),
+        )
+        .unwrap()
+        .command,
+        PlayerCommand::PlayStation {
+            station_id: "somafm-metal-detector".into()
+        }
+    );
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                device_id,
+                json!({"name":"volume.change_volume","delta":-7})
+            ),
+            Some(device_id),
+        )
+        .unwrap()
+        .command,
+        PlayerCommand::ChangeVolume { delta: -7 }
+    );
+    assert_eq!(
+        command_from_frame(
+            &command_frame(command_id, device_id, json!({"name":"station.play_stream","source":"direct_stream","stream_uri":"https://unsafe.example/stream"})),
+            Some(device_id),
+        ).unwrap_err().code,
+        "unsupported_command"
+    );
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                "00000000-0000-4000-8000-000000000004",
+                json!({"name":"playback.play"})
+            ),
+            Some(device_id),
+        )
+        .unwrap_err()
+        .code,
+        "invalid_payload"
+    );
+    for (name, expected) in [
+        ("playback.play", PlayerCommand::Play),
+        ("playback.pause", PlayerCommand::Pause),
+        ("playback.stop", PlayerCommand::Stop),
+        ("playback.next", PlayerCommand::Next),
+        ("playback.previous", PlayerCommand::Previous),
+    ] {
+        assert_eq!(
+            command_from_frame(
+                &command_frame(command_id, device_id, json!({"name": name})),
+                Some(device_id)
+            )
+            .unwrap()
+            .command,
+            expected
+        );
+    }
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                device_id,
+                json!({"name":"volume.set_volume","level":100})
+            ),
+            Some(device_id),
+        )
+        .unwrap()
+        .command,
+        PlayerCommand::SetVolume { level: 100 }
+    );
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                device_id,
+                json!({"name":"volume.set_mute","muted":true})
+            ),
+            Some(device_id),
+        )
+        .unwrap()
+        .command,
+        PlayerCommand::SetMute { muted: true }
+    );
+}
+
+#[test]
+fn unsupported_local_capabilities_never_reach_the_ui() {
+    assert!(command_is_advertised(&PlayerCommand::Play));
+    assert!(command_is_advertised(&PlayerCommand::SetVolume {
+        level: 50
+    }));
+    assert!(!command_is_advertised(&PlayerCommand::Pause));
+    assert!(!command_is_advertised(&PlayerCommand::SetMute {
+        muted: true
+    }));
+}
+
+#[test]
+fn duplicate_command_executes_once_and_sends_one_terminal_result() {
+    let command_id = "00000000-0000-4000-8000-000000000005";
+    let device_id = "00000000-0000-4000-8000-000000000006";
+    let inner = ClientInner {
+        config: RuntimeConfig::for_test("http://127.0.0.1".into(), None),
+        auth: Arc::new(FakeAuth),
+        transport: Arc::new(FakeTransport),
+        state: Mutex::new(None),
+        authenticated_device_id: Mutex::new(Some(device_id.into())),
+        commands: Mutex::new(CommandBook::new()),
+        stopped: AtomicBool::new(false),
+        running: AtomicBool::new(false),
+        worker: Mutex::new(None),
+    };
+    let frame = command_frame(command_id, device_id, json!({"name":"playback.stop"}));
+    let mut socket = FakeSocket {
+        inbound: VecDeque::new(),
+        sent: vec![],
+    };
+    receive_command(&mut socket, &inner, &frame).unwrap();
+    receive_command(&mut socket, &inner, &frame).unwrap();
+    assert_eq!(
+        socket
+            .sent
+            .iter()
+            .filter(|frame| frame["type"] == "command.accepted")
+            .count(),
+        1
+    );
+    let command = inner.commands.lock().queued.pop_front().unwrap();
+    inner
+        .commands
+        .lock()
+        .in_flight
+        .insert(command.id.clone(), command);
+    inner
+        .commands
+        .lock()
+        .complete(command_id, CommandResult::succeeded());
+    send_pending_results(&mut socket, &inner).unwrap();
+    send_pending_results(&mut socket, &inner).unwrap();
+    assert_eq!(
+        socket
+            .sent
+            .iter()
+            .filter(|frame| frame["type"] == "command.result")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn reconnect_backoff_is_bounded_and_deterministic() {
     assert_eq!(backoff(0), Duration::from_secs(1));
@@ -86,6 +258,8 @@ fn hello_registration_and_fresh_snapshot_are_ordered() {
         auth: Arc::new(FakeAuth),
         transport: Arc::new(FakeTransport),
         state: Mutex::new(Some(state)),
+        authenticated_device_id: Mutex::new(None),
+        commands: Mutex::new(CommandBook::new()),
         stopped: AtomicBool::new(false),
         running: AtomicBool::new(false),
         worker: Mutex::new(None),
@@ -145,6 +319,8 @@ fn resync_always_publishes_another_full_snapshot() {
         auth: Arc::new(FakeAuth),
         transport: Arc::new(FakeTransport),
         state: Mutex::new(Some(state)),
+        authenticated_device_id: Mutex::new(None),
+        commands: Mutex::new(CommandBook::new()),
         stopped: AtomicBool::new(false),
         running: AtomicBool::new(false),
         worker: Mutex::new(None),
@@ -172,6 +348,8 @@ fn server_disconnect_is_recoverable_and_does_not_execute_playback() {
         auth: Arc::new(FakeAuth),
         transport: Arc::new(FakeTransport),
         state: Mutex::new(None),
+        authenticated_device_id: Mutex::new(None),
+        commands: Mutex::new(CommandBook::new()),
         stopped: AtomicBool::new(false),
         running: AtomicBool::new(false),
         worker: Mutex::new(None),

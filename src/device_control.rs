@@ -14,13 +14,15 @@ use crate::{
     session::{AccountClient, OsCredentialStore, SessionError},
 };
 use parking_lot::Mutex;
-pub(crate) use protocol::PlayerState;
+pub(crate) use protocol::{CommandResult, DeviceCommand, PlayerCommand, PlayerState};
 use protocol::{
     ControlError, HEARTBEAT, Inbound, NO_IDENTITY_DELAY, POLL, PublishedState, backoff,
-    control_endpoint, inbound_type, is_auth_error, manifest, send, timestamp, wait_or_stop,
+    command_accepted, command_from_frame, command_result, control_endpoint, inbound_type,
+    is_auth_error, manifest, send, timestamp, wait_or_stop,
 };
 use serde_json::json;
 use std::{
+    collections::{HashMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -50,9 +52,44 @@ struct ClientInner {
     auth: Arc<dyn DeviceControlAuth>,
     transport: Arc<dyn DeviceControlTransport>,
     state: Mutex<Option<PublishedState>>,
+    authenticated_device_id: Mutex<Option<String>>,
+    commands: Mutex<CommandBook>,
     stopped: AtomicBool,
     running: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+const MAX_DEDUPED_COMMANDS: usize = 64;
+
+struct CommandBook {
+    queued: VecDeque<DeviceCommand>,
+    in_flight: HashMap<String, DeviceCommand>,
+    completed: HashMap<String, (CommandResult, bool)>,
+    completed_order: VecDeque<String>,
+}
+
+impl CommandBook {
+    fn new() -> Self {
+        Self {
+            queued: VecDeque::new(),
+            in_flight: HashMap::new(),
+            completed: HashMap::new(),
+            completed_order: VecDeque::new(),
+        }
+    }
+
+    fn complete(&mut self, command_id: &str, result: CommandResult) {
+        if self.in_flight.remove(command_id).is_none() {
+            return;
+        }
+        self.completed.insert(command_id.into(), (result, false));
+        self.completed_order.push_back(command_id.into());
+        while self.completed_order.len() > MAX_DEDUPED_COMMANDS {
+            if let Some(oldest) = self.completed_order.pop_front() {
+                self.completed.remove(&oldest);
+            }
+        }
+    }
 }
 
 /// One bounded, process-local connection loop. It neither creates nor stores
@@ -86,6 +123,8 @@ impl DeviceControlClient {
                 auth,
                 transport,
                 state: Mutex::new(None),
+                authenticated_device_id: Mutex::new(None),
+                commands: Mutex::new(CommandBook::new()),
                 stopped: AtomicBool::new(false),
                 running: AtomicBool::new(false),
                 worker: Mutex::new(None),
@@ -135,6 +174,20 @@ impl DeviceControlClient {
         if let Some(worker) = self.inner.worker.lock().take() {
             let _ = worker.join();
         }
+    }
+
+    /// The UI thread remains the sole PlaybackController owner.
+    pub(crate) fn take_command(&self) -> Option<DeviceCommand> {
+        let mut commands = self.inner.commands.lock();
+        let command = commands.queued.pop_front()?;
+        commands
+            .in_flight
+            .insert(command.id.clone(), command.clone());
+        Some(command)
+    }
+
+    pub(crate) fn complete_command(&self, command_id: &str, result: CommandResult) {
+        self.inner.commands.lock().complete(command_id, result);
     }
 }
 
@@ -191,6 +244,7 @@ fn run_connection(
     inner: &ClientInner,
     mut socket: Box<dyn ControlSocket>,
 ) -> Result<(), ControlError> {
+    *inner.authenticated_device_id.lock() = None;
     send(
         &mut *socket,
         "protocol.hello",
@@ -243,6 +297,7 @@ fn run_connection(
             heartbeat_sequence = heartbeat_sequence.saturating_add(1);
             next_heartbeat = Instant::now() + HEARTBEAT;
         }
+        send_pending_results(&mut *socket, inner)?;
         match socket.read()? {
             None => thread::sleep(POLL),
             Some(Inbound::Ping(payload)) => {
@@ -259,14 +314,95 @@ fn run_connection(
                     return Err(ControlError::Authentication);
                 }
                 Some(kind) if kind == "device.command" => {
-                    // DC-013 owns parsing, authorization acknowledgements and
-                    // terminal results. Do not pretend this frame executed.
-                    log::debug!("device-control command deferred to DC-013");
+                    receive_command(&mut *socket, inner, &text)?
                 }
                 Some(_) | None => {}
             },
         }
     }
+}
+
+fn receive_command(
+    socket: &mut dyn ControlSocket,
+    inner: &ClientInner,
+    frame: &str,
+) -> Result<(), ControlError> {
+    let device_id = inner.authenticated_device_id.lock().clone();
+    let command = match command_from_frame(frame, device_id.as_deref()) {
+        Ok(command) => command,
+        Err(reject) => {
+            if let Some(command_id) = reject.command_id {
+                command_result(
+                    socket,
+                    &command_id,
+                    &CommandResult::failed(reject.code, "Command was rejected"),
+                )?;
+            }
+            return Ok(());
+        }
+    };
+    if !command_is_advertised(&command.command) {
+        return command_result(
+            socket,
+            &command.id,
+            &CommandResult::failed(
+                "capability_not_supported",
+                "Command is not supported by this player",
+            ),
+        );
+    }
+    let mut commands = inner.commands.lock();
+    if commands.in_flight.contains_key(&command.id)
+        || commands.queued.iter().any(|queued| queued.id == command.id)
+    {
+        return Ok(());
+    }
+    if let Some((result, delivered)) = commands.completed.get_mut(&command.id) {
+        if !*delivered {
+            command_result(socket, &command.id, result)?;
+            *delivered = true;
+        }
+        return Ok(());
+    }
+    commands.queued.push_back(command.clone());
+    drop(commands);
+    command_accepted(socket, &command.id)
+}
+
+fn command_is_advertised(command: &PlayerCommand) -> bool {
+    matches!(
+        command,
+        PlayerCommand::Play
+            | PlayerCommand::Stop
+            | PlayerCommand::Next
+            | PlayerCommand::Previous
+            | PlayerCommand::PlayStation { .. }
+            | PlayerCommand::PlayStream { .. }
+            | PlayerCommand::SetVolume { .. }
+            | PlayerCommand::ChangeVolume { .. }
+    )
+}
+
+fn send_pending_results(
+    socket: &mut dyn ControlSocket,
+    inner: &ClientInner,
+) -> Result<(), ControlError> {
+    let pending = {
+        let commands = inner.commands.lock();
+        commands
+            .completed
+            .iter()
+            .filter(|(_, (_, delivered))| !*delivered)
+            .map(|(id, (result, _))| (id.clone(), result.clone()))
+            .collect::<Vec<_>>()
+    };
+    for (command_id, result) in pending {
+        command_result(socket, &command_id, &result)?;
+        if let Some((_, delivered)) = inner.commands.lock().completed.get_mut(&command_id) {
+            *delivered = true;
+        }
+    }
+    Ok(())
 }
 
 fn wait_for(
@@ -285,7 +421,21 @@ fn wait_for(
             Some(Inbound::Close) => return Err(ControlError::Unavailable),
             Some(Inbound::Ping(_)) => {}
             Some(Inbound::Text(text)) => match inbound_type(&text)? {
-                Some(kind) if kind == expected => return Ok(()),
+                Some(kind) if kind == expected => {
+                    if expected == "device.registered" {
+                        let device_id = serde_json::from_str::<serde_json::Value>(&text)
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .pointer("/payload/authenticated_device_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+                        *inner.authenticated_device_id.lock() = device_id;
+                    }
+                    return Ok(());
+                }
                 Some(kind) if kind == "protocol.error" && is_auth_error(&text) => {
                     return Err(ControlError::Authentication);
                 }

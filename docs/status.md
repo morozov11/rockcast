@@ -1,5 +1,32 @@
 # RockCast status
 
+## DC-013 — server-routed playback and volume commands (local implementation, 2026-09-04)
+
+RockCast now strictly parses bounded `device.command` frames only after device registration and
+requires their explicit target to match the server-authenticated device ID. It accepts the
+truthfully advertised playback (`play`, `stop`, `next`, `previous`), station and volume commands,
+deduplicates queued/in-flight/completed command IDs in a bounded process-local ledger, and returns
+one terminal result only after the UI-owned `PlaybackController` has emitted its outcome. Completed
+results whose send failed stay undelivered and are retried on a later authenticated connection;
+disconnect never becomes a synthetic success.
+
+`station.play_station` and RockServer-resolved `station.play_stream` map only to the current
+validated local catalog (exact station ID or exact catalog stream URI). `direct_stream` is rejected;
+no URL, identity, scope, output target, Chromecast or relay input is accepted from a command.
+Pause and mute are parsed but rejected as `capability_not_supported`, because the existing
+PlaybackController/manifest does not support them. State is published from the existing local facts
+only after command handling; no remote optimistic playback, station, volume or mute value is made.
+
+Checks passed: `cargo fmt --check`, strict all-target/all-feature Clippy, focused device-control
+and playback-adapter tests, and `cargo test` (114 passed) in the interactive Windows profile. The
+sandbox identity has no user DPAPI key, so the DPAPI test must run in that interactive profile; its
+green result confirms the production credential path without weakening it. Live RockServer/Rockmobile
+E2E was not run because it requires paired credentials and a deployed command router. The published
+v1 error enum has no specific playback-failure/cancelled code, so actual playback
+error/interruption is represented as a failed `command_timeout` result; this contract limitation is
+isolated here rather than changing RockServer/OpenAPI. DC-014 remains the handoff for Chromecast and
+relay commands.
+
 ## Structural refactor (2026-09-04)
 
 The DC-012 device-control implementation is now split by lifecycle, v1 wire protocol,
@@ -19,10 +46,8 @@ credential is handled by the existing session renewal path.
 The v1 assumptions are `hello → welcome → register → registered → state_full`, 65,536-byte frames,
 61,440-byte payloads, and server-derived identity (no identity or secret is sent in protocol
 messages). The manifest intentionally excludes Chromecast, relay, display, voice, Home Assistant,
-and mute. DC-013 still owns inbound `device.command` execution, acknowledgements/results, and
-post-command state confirmation; DC-012 safely ignores such frames. Local unit/compile checks are
-recorded with this change; live deployed-control-plane E2E remains unverified, so this is not marked
-as full acceptance complete.
+and mute. DC-013 is implemented locally as documented above; live deployed-control-plane E2E
+remains unverified, so this is not marked as full acceptance complete.
 
 ## Authenticated voice route (implemented locally, 2026-09-02)
 

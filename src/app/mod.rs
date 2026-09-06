@@ -71,6 +71,11 @@ pub(super) enum AccountErrorKind {
     SecureStorage,
 }
 
+pub(super) struct PendingRemoteCommand {
+    pub(super) id: String,
+    pub(super) generation: u64,
+}
+
 pub(super) fn account_session_active(state: &AccountUiState) -> bool {
     matches!(
         state,
@@ -136,6 +141,7 @@ pub struct RockCastApp {
     pub(super) lang: Lang,
     pub(super) rockserver: RuntimeConfig,
     pub(super) device_control: DeviceControlClient,
+    pub(super) pending_remote_command: Option<PendingRemoteCommand>,
     pub(super) telemetry: Telemetry,
     pub(super) eq_repaint_next: Instant,
     /// UI-owned decoded textures. Fetch/decode stays in the BackgroundRuntime.
@@ -240,6 +246,7 @@ impl RockCastApp {
             lang,
             rockserver,
             device_control,
+            pending_remote_command: None,
             telemetry: Telemetry::new(),
             eq_repaint_next: Instant::now(),
             station_icons: HashMap::new(),
@@ -259,6 +266,7 @@ impl eframe::App for RockCastApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.bootstrap();
         self.poll_messages(ctx);
+        self.poll_device_control_commands();
         self.poll_pairing();
         self.apply_volume_if_needed();
         self.sync_device_control_state();

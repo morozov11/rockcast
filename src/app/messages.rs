@@ -1,6 +1,6 @@
 //! Background → UI channel messages.
 
-use crate::{output::OutputDevice, stations::Station};
+use crate::{cast::CastDeviceInfo, output::OutputDevice, stations::Station};
 
 pub(crate) enum UiMsg {
     Stations {
@@ -12,6 +12,10 @@ pub(crate) enum UiMsg {
     },
     DeviceFound(OutputDevice),
     DevicesFinished(String),
+    RemoteChromecastDiscovery {
+        command_id: String,
+        result: Result<Vec<CastDeviceInfo>, ()>,
+    },
     StationIcon {
         request_key: String,
         image: Option<crate::station_icons::StationIconImage>,

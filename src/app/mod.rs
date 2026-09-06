@@ -18,7 +18,8 @@ use std::{
 use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke, TextureHandle, Vec2};
 
 use crate::{
-    device_control::{DeviceControlClient, PlayerState},
+    cast::CastDeviceInfo,
+    device_control::{DeviceControlClient, PlayerState, ReceiverCache},
     i18n::Lang,
     observers::{BANDS, StreamObservers},
     output::OutputDevice,
@@ -74,6 +75,14 @@ pub(super) enum AccountErrorKind {
 pub(super) struct PendingRemoteCommand {
     pub(super) id: String,
     pub(super) generation: u64,
+    pub(super) output: Option<RemoteOutput>,
+}
+
+#[derive(Clone)]
+pub(super) enum RemoteOutput {
+    Local,
+    Chromecast(Option<String>),
+    Relay(Option<String>),
 }
 
 pub(super) fn account_session_active(state: &AccountUiState) -> bool {
@@ -142,6 +151,9 @@ pub struct RockCastApp {
     pub(super) rockserver: RuntimeConfig,
     pub(super) device_control: DeviceControlClient,
     pub(super) pending_remote_command: Option<PendingRemoteCommand>,
+    pub(super) pending_chromecast_discovery: Option<String>,
+    pub(super) chromecast_receivers: ReceiverCache<CastDeviceInfo>,
+    pub(super) output: RemoteOutput,
     pub(super) telemetry: Telemetry,
     pub(super) eq_repaint_next: Instant,
     /// UI-owned decoded textures. Fetch/decode stays in the BackgroundRuntime.
@@ -247,6 +259,9 @@ impl RockCastApp {
             rockserver,
             device_control,
             pending_remote_command: None,
+            pending_chromecast_discovery: None,
+            chromecast_receivers: ReceiverCache::default(),
+            output: RemoteOutput::Local,
             telemetry: Telemetry::new(),
             eq_repaint_next: Instant::now(),
             station_icons: HashMap::new(),
@@ -471,6 +486,17 @@ impl RockCastApp {
                 })
                 .flatten(),
             volume: self.volume,
+            output_mode: match &self.output {
+                RemoteOutput::Local => "local",
+                RemoteOutput::Chromecast(_) => "chromecast",
+                RemoteOutput::Relay(_) => "relay",
+            },
+            receiver_id: match &self.output {
+                RemoteOutput::Chromecast(receiver_id) | RemoteOutput::Relay(receiver_id) => {
+                    receiver_id.clone()
+                }
+                RemoteOutput::Local => None,
+            },
         };
         if let Some(revision) = self.device_control.publish(state) {
             self.settings.device_control_state_revision = revision;

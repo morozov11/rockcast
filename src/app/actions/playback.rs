@@ -1,9 +1,12 @@
 //! Play, stop, shutdown, and observer wiring.
 
 use crate::{
-    device_control::{CommandResult, PlayerCommand},
+    device_control::{ChromecastDiscovery, CommandResult, LocalChromecastDiscovery, PlayerCommand},
+    output::OutputDevice,
     voice::VoiceControl,
 };
+use std::time::Duration;
+use time::OffsetDateTime;
 
 use super::super::RockCastApp;
 
@@ -14,6 +17,11 @@ enum RemoteCommandPlan {
     PlayRelative(isize),
     PlayStation(usize),
     SetVolume(u8),
+    ChromecastDiscover,
+    ChromecastConnect { receiver_id: String },
+    ChromecastDisconnect,
+    RelayStart,
+    RelayStop,
 }
 
 fn plan_remote_command(
@@ -57,6 +65,22 @@ fn plan_remote_command(
         PlayerCommand::Pause | PlayerCommand::SetMute { .. } => Err(CommandResult::failed(
             "capability_not_supported",
             "Command is not supported by this player",
+        )),
+        PlayerCommand::ChromecastDiscover => Ok(RemoteCommandPlan::ChromecastDiscover),
+        PlayerCommand::ChromecastConnect { receiver_id } => {
+            Ok(RemoteCommandPlan::ChromecastConnect {
+                receiver_id: receiver_id.clone(),
+            })
+        }
+        PlayerCommand::ChromecastDisconnect => Ok(RemoteCommandPlan::ChromecastDisconnect),
+        PlayerCommand::RelayStart => Ok(RemoteCommandPlan::RelayStart),
+        PlayerCommand::RelayStop => Ok(RemoteCommandPlan::RelayStop),
+        PlayerCommand::RelaySetMode { mode } if mode == "via_pc" => {
+            Ok(RemoteCommandPlan::RelayStart)
+        }
+        PlayerCommand::RelaySetMode { .. } => Err(CommandResult::failed(
+            "capability_not_supported",
+            "Relay mode is not supported by this player",
         )),
     }
 }
@@ -192,6 +216,159 @@ impl RockCastApp {
                         .complete_command(&command_id, CommandResult::succeeded());
                     continue;
                 }
+                RemoteCommandPlan::ChromecastDiscover => {
+                    self.discover_chromecasts(&command_id);
+                    continue;
+                }
+                RemoteCommandPlan::ChromecastConnect { receiver_id } => {
+                    let Some(device) = self
+                        .chromecast_receivers
+                        .get_fresh_at(&receiver_id, OffsetDateTime::now_utc())
+                    else {
+                        self.device_control.complete_command(
+                            &command_id,
+                            CommandResult::failed(
+                                "invalid_payload",
+                                "Chromecast receiver is missing or discovery has expired",
+                            ),
+                        );
+                        continue;
+                    };
+                    if self.selected_station.is_none() {
+                        self.device_control.complete_command(
+                            &command_id,
+                            CommandResult::failed(
+                                "invalid_payload",
+                                "A selected station is required before connecting Chromecast",
+                            ),
+                        );
+                        continue;
+                    }
+                    self.select_cast_device(device);
+                    self.cast_relay = false;
+                    let generation = self.play();
+                    self.track_remote_transition(
+                        &command_id,
+                        generation,
+                        super::super::RemoteOutput::Chromecast(Some(receiver_id)),
+                    );
+                    continue;
+                }
+                RemoteCommandPlan::ChromecastDisconnect => {
+                    if matches!(&self.output, super::super::RemoteOutput::Local) {
+                        self.device_control
+                            .complete_command(&command_id, CommandResult::succeeded());
+                        continue;
+                    }
+                    let Some(local_index) = self.devices.iter().position(OutputDevice::is_local)
+                    else {
+                        self.device_control.complete_command(
+                            &command_id,
+                            CommandResult::failed(
+                                "invalid_payload",
+                                "No local output is available for Chromecast fallback",
+                            ),
+                        );
+                        continue;
+                    };
+                    if self.selected_station.is_none() {
+                        self.device_control.complete_command(
+                            &command_id,
+                            CommandResult::failed(
+                                "invalid_payload",
+                                "A selected station is required before local fallback",
+                            ),
+                        );
+                        continue;
+                    }
+                    self.selected_device = Some(local_index);
+                    self.cast_relay = false;
+                    let generation = self.play();
+                    self.track_remote_transition(
+                        &command_id,
+                        generation,
+                        super::super::RemoteOutput::Local,
+                    );
+                    continue;
+                }
+                RemoteCommandPlan::RelayStart => {
+                    if matches!(&self.output, super::super::RemoteOutput::Relay(_))
+                        && self.playback.relay_active()
+                    {
+                        self.device_control
+                            .complete_command(&command_id, CommandResult::succeeded());
+                        continue;
+                    }
+                    let receiver_id = match &self.output {
+                        super::super::RemoteOutput::Chromecast(receiver_id) => receiver_id.clone(),
+                        _ => {
+                            self.device_control.complete_command(
+                                &command_id,
+                                CommandResult::failed(
+                                    "invalid_payload",
+                                    "Relay requires confirmed Chromecast playback",
+                                ),
+                            );
+                            continue;
+                        }
+                    };
+                    if !self.playing
+                        || self.selected_station.is_none()
+                        || self
+                            .selected_device
+                            .and_then(|index| self.devices.get(index))
+                            .is_none_or(|device| device.is_local())
+                    {
+                        self.device_control.complete_command(
+                            &command_id,
+                            CommandResult::failed(
+                                "invalid_payload",
+                                "Relay requires active Chromecast playback",
+                            ),
+                        );
+                        continue;
+                    }
+                    self.cast_relay = true;
+                    let generation = self.play();
+                    self.track_remote_transition(
+                        &command_id,
+                        generation,
+                        super::super::RemoteOutput::Relay(receiver_id),
+                    );
+                    continue;
+                }
+                RemoteCommandPlan::RelayStop => {
+                    let receiver_id = match &self.output {
+                        super::super::RemoteOutput::Relay(receiver_id) => receiver_id.clone(),
+                        super::super::RemoteOutput::Chromecast(_) => {
+                            self.device_control
+                                .complete_command(&command_id, CommandResult::succeeded());
+                            continue;
+                        }
+                        _ => {
+                            self.device_control.complete_command(
+                                &command_id,
+                                CommandResult::failed("invalid_payload", "Relay is not active"),
+                            );
+                            continue;
+                        }
+                    };
+                    if !self.playing || self.selected_station.is_none() {
+                        self.device_control.complete_command(
+                            &command_id,
+                            CommandResult::failed("invalid_payload", "Relay output is unavailable"),
+                        );
+                        continue;
+                    }
+                    self.cast_relay = false;
+                    let generation = self.play();
+                    self.track_remote_transition(
+                        &command_id,
+                        generation,
+                        super::super::RemoteOutput::Chromecast(receiver_id),
+                    );
+                    continue;
+                }
             };
             if let Some(generation) = generation {
                 if let Some(previous) =
@@ -199,6 +376,7 @@ impl RockCastApp {
                         .replace(super::super::PendingRemoteCommand {
                             id: command_id,
                             generation,
+                            output: None,
                         })
                 {
                     self.device_control.complete_command(
@@ -215,6 +393,85 @@ impl RockCastApp {
                     ),
                 );
             }
+        }
+    }
+
+    fn discover_chromecasts(&mut self, command_id: &str) {
+        if self.pending_chromecast_discovery.is_some() {
+            self.device_control.complete_command(
+                command_id,
+                CommandResult::failed("command_timeout", "Chromecast discovery is already running"),
+            );
+            return;
+        }
+        let command_id = command_id.to_string();
+        let completion_id = command_id.clone();
+        self.pending_chromecast_discovery = Some(command_id.clone());
+        let tx = self.ui_tx.clone();
+        if self
+            .playback
+            .spawn_job(move |_| {
+                let result = LocalChromecastDiscovery.discover(Duration::from_secs(5));
+                let _ = tx.send(super::super::messages::UiMsg::RemoteChromecastDiscovery {
+                    command_id,
+                    result,
+                });
+            })
+            .is_err()
+        {
+            self.pending_chromecast_discovery = None;
+            self.device_control.complete_command(
+                &completion_id,
+                CommandResult::failed("command_timeout", "Chromecast discovery could not start"),
+            );
+        }
+    }
+
+    fn select_cast_device(&mut self, device: crate::cast::CastDeviceInfo) {
+        let device = OutputDevice::Cast(device);
+        let id = device.id().to_string();
+        if let Some(index) = self
+            .devices
+            .iter()
+            .position(|existing| super::super::messages::same_output_device(existing, &device))
+        {
+            self.devices[index] = device;
+            self.selected_device = Some(index);
+        } else {
+            self.devices.push(device);
+            self.devices.sort_by_key(|device| !device.is_local());
+            self.selected_device = self.devices.iter().position(|device| device.id() == id);
+        }
+    }
+
+    fn track_remote_transition(
+        &mut self,
+        command_id: &str,
+        generation: Option<u64>,
+        output: super::super::RemoteOutput,
+    ) {
+        let Some(generation) = generation else {
+            self.device_control.complete_command(
+                command_id,
+                CommandResult::failed(
+                    "invalid_payload",
+                    "Command cannot be applied to local playback state",
+                ),
+            );
+            return;
+        };
+        if let Some(previous) =
+            self.pending_remote_command
+                .replace(super::super::PendingRemoteCommand {
+                    id: command_id.to_string(),
+                    generation,
+                    output: Some(output),
+                })
+        {
+            self.device_control.complete_command(
+                &previous.id,
+                CommandResult::failed("command_timeout", "Command was interrupted"),
+            );
         }
     }
 

@@ -2,6 +2,7 @@
 
 use crate::{i18n, playback::PlaybackEvent};
 use eframe::egui;
+use time::OffsetDateTime;
 
 use super::super::{
     RockCastApp,
@@ -54,6 +55,7 @@ impl RockCastApp {
                     self.playing = true;
                     self.playing_local = local;
                     self.playing_url = Some(url.clone());
+                    self.confirm_playback_output(generation, local);
                     if let Some(station) = self
                         .stations
                         .iter()
@@ -85,6 +87,7 @@ impl RockCastApp {
                     self.observers.stop();
                     self.track = self.lang.t().stopped.into();
                     self.status = self.lang.t().stopped.into();
+                    self.output = super::super::RemoteOutput::Local;
                     self.finish_remote_command(generation, true);
                 }
                 PlaybackEvent::Error {
@@ -113,6 +116,7 @@ impl RockCastApp {
                     self.selected_station = None;
                     self.station_now = "—".into();
                     self.track = self.lang.t().track_hint.into();
+                    self.output = super::super::RemoteOutput::Local;
                     if let Some(next) = self.voice_fallback.pop_front() {
                         log::info!(
                             "voice fallback: trying next station name={:?} url={} remaining={}",
@@ -244,6 +248,39 @@ impl RockCastApp {
                             "device selected after scan: idx={i} id={}",
                             self.devices.get(i).map(|d| d.id()).unwrap_or("?")
                         );
+                    }
+                }
+                UiMsg::RemoteChromecastDiscovery { command_id, result } => {
+                    if self.pending_chromecast_discovery.as_deref() != Some(&command_id) {
+                        continue;
+                    }
+                    self.pending_chromecast_discovery = None;
+                    match result {
+                        Ok(devices) => {
+                            let receivers = self.chromecast_receivers.replace_at(
+                                devices.into_iter().map(|device| {
+                                    (
+                                        device.discovered.id.clone(),
+                                        device.discovered.name.clone(),
+                                        device,
+                                    )
+                                }),
+                                OffsetDateTime::now_utc(),
+                            );
+                            self.device_control.complete_command(
+                                &command_id,
+                                crate::device_control::CommandResult::succeeded_with_receivers(
+                                    receivers,
+                                ),
+                            );
+                        }
+                        Err(()) => self.device_control.complete_command(
+                            &command_id,
+                            crate::device_control::CommandResult::failed(
+                                "command_timeout",
+                                "Chromecast discovery failed",
+                            ),
+                        ),
                     }
                 }
                 UiMsg::VoiceResult(result) => {
@@ -469,6 +506,9 @@ impl RockCastApp {
             self.pending_remote_command = Some(pending);
             return;
         }
+        if succeeded && let Some(output) = pending.output {
+            self.output = output;
+        }
         self.device_control.complete_command(
             &pending.id,
             if succeeded {
@@ -482,6 +522,25 @@ impl RockCastApp {
                 )
             },
         );
+    }
+
+    fn confirm_playback_output(&mut self, generation: u64, local: bool) {
+        if local {
+            self.output = super::super::RemoteOutput::Local;
+            return;
+        }
+        let pending = self
+            .pending_remote_command
+            .as_ref()
+            .filter(|pending| pending.generation == generation)
+            .and_then(|pending| pending.output.clone());
+        self.output = pending.unwrap_or_else(|| {
+            if self.playback.relay_active() {
+                super::super::RemoteOutput::Relay(None)
+            } else {
+                super::super::RemoteOutput::Chromecast(None)
+            }
+        });
     }
 
     fn finish_stale_remote_command(&mut self) {

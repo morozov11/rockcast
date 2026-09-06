@@ -1,5 +1,25 @@
 # RockCast status
 
+## DC-014 — Chromecast and relay adapters (local implementation, 2026-09-06)
+
+RockCast now advertises its real CastV2 actions (`discover`, `connect`, `disconnect`) with a
+60-second receiver-cache TTL and its existing PC-to-Cast relay operations (`start`, `stop`,
+`set_mode` with only `via_pc`). Discovery maps internal network receiver data to opaque UUID
+handles local to the running player; the command result has the canonical bounded receiver list,
+and neither a handle nor a receiver is registered, paired, persisted, or exposed as a control
+target. Expired/missing handles and arbitrary hostnames are rejected before a hardware action.
+
+The UI remains the exclusive PlaybackController owner. Cast connect, local fallback disconnect and
+relay transitions complete only on an actual playback event; failures/interruption return one
+terminal failure and publish the factual fallback output state. State contains exactly one output
+mode (`local`, `chromecast`, `relay`) and includes `receiver_id` only for a known live handle.
+WSS reconnect may retry an unsent result but cannot recreate a completed hardware operation.
+
+Checks: `cargo fmt --check`, `cargo check --all-targets`, strict all-target/all-feature Clippy,
+focused device-control tests and `cargo test` were run. The full suite had 116 passing tests plus
+the pre-existing environment-specific DPAPI failure (`legacy_dpapi_blob_is_an_absent_session_not_a_storage_failure`): this sandbox lacks the interactive Windows user DPAPI key. No test was
+weakened. No live Chromecast/network smoke was run, and Rockmobile/DC-015/DC-016 remain external.
+
 ## DC-013 — server-routed playback and volume commands (local implementation, 2026-09-04)
 
 RockCast now strictly parses bounded `device.command` frames only after device registration and

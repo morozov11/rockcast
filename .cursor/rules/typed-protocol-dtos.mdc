@@ -1,0 +1,17 @@
+---
+description: Keep Rust protocol boundaries strongly typed
+globs: src/**/*.rs
+alwaysApply: false
+---
+
+# Typed protocol DTOs
+
+- Model stable JSON protocol messages, manifests, commands, results and runtime state with
+  `Serialize` / `Deserialize` DTOs. Do not construct or inspect these contracts with
+  `serde_json::Value`, `json!`, object indexing, or stringly-typed field maps.
+- Use `serde_json::Value` only at an explicitly documented forward-compatible or untyped
+  boundary where a closed DTO cannot represent the contract; validate and convert it immediately.
+- Keep protocol field names, enum values, optional fields, bounds and unknown-field rejection in
+  the DTO/serde declaration. Add a focused wire-shape test whenever a DTO changes.
+- JSON values in test fixtures are allowed, but assertions for production wire shape should decode
+  into the relevant DTO where practical.

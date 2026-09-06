@@ -30,24 +30,30 @@ fn message(kind: &str) -> Inbound {
 }
 
 #[test]
-fn manifest_and_state_are_truthful_and_bounded() {
-    let manifest = manifest();
+fn manifest_and_state_advertise_only_the_implemented_output_actions() {
+    let manifest = serde_json::to_value(super::protocol::manifest()).unwrap();
     assert_eq!(manifest["roles"], json!(["player"]));
-    assert!(
-        manifest["capabilities"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| {
-                !matches!(
-                    item["name"].as_str(),
-                    Some("media.chromecast") | Some("media.relay")
-                )
-            })
+    let items = manifest["capabilities"]["items"].as_array().unwrap();
+    assert!(items.iter().any(|item| {
+        item == &json!({
+            "name": "media.chromecast", "version": 1,
+            "actions": ["discover", "connect", "disconnect"],
+            "discovery_ttl_seconds": 60,
+        })
+    }));
+    assert!(items.iter().any(|item| {
+        item == &json!({
+            "name": "media.relay", "version": 1,
+            "actions": ["start", "stop", "set_mode"], "modes": ["via_pc"],
+        })
+    }));
+    assert_eq!(
+        serde_json::to_value(PlayerState::idle(63).runtime_state()).unwrap()["volume"],
+        json!({"level":63,"muted":false})
     );
     assert_eq!(
-        PlayerState::idle(63).runtime_state()["volume"],
-        json!({"level":63,"muted":false})
+        serde_json::to_value(PlayerState::idle(63).runtime_state()).unwrap()["output"],
+        json!({"mode":"local"})
     );
 }
 
@@ -173,6 +179,50 @@ fn commands_are_strictly_bounded_and_catalog_only() {
         .command,
         PlayerCommand::SetMute { muted: true }
     );
+    let receiver_id = "00000000-0000-4000-8000-000000000007";
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                device_id,
+                json!({"name":"chromecast.connect","receiver_id":receiver_id})
+            ),
+            Some(device_id),
+        )
+        .unwrap()
+        .command,
+        PlayerCommand::ChromecastConnect {
+            receiver_id: receiver_id.into()
+        }
+    );
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                device_id,
+                json!({"name":"relay.set_mode","mode":"via_pc"})
+            ),
+            Some(device_id),
+        )
+        .unwrap()
+        .command,
+        PlayerCommand::RelaySetMode {
+            mode: "via_pc".into()
+        }
+    );
+    assert_eq!(
+        command_from_frame(
+            &command_frame(
+                command_id,
+                device_id,
+                json!({"name":"chromecast.connect","receiver_id":"192.168.1.4"})
+            ),
+            Some(device_id),
+        )
+        .unwrap_err()
+        .code,
+        "invalid_payload"
+    );
 }
 
 #[test]
@@ -185,6 +235,33 @@ fn unsupported_local_capabilities_never_reach_the_ui() {
     assert!(!command_is_advertised(&PlayerCommand::SetMute {
         muted: true
     }));
+    assert!(command_is_advertised(&PlayerCommand::ChromecastDiscover));
+    assert!(command_is_advertised(&PlayerCommand::RelaySetMode {
+        mode: "via_pc".into()
+    }));
+}
+
+#[test]
+fn discovery_result_uses_the_canonical_receivers_output_shape() {
+    let mut socket = FakeSocket {
+        inbound: VecDeque::new(),
+        sent: vec![],
+    };
+    command_result(
+        &mut socket,
+        "00000000-0000-4000-8000-000000000008",
+        &CommandResult::succeeded_with_receivers(vec![super::output::ChromecastReceiver {
+            receiver_id: "00000000-0000-4000-8000-000000000009".into(),
+            display_name: "Kitchen".into(),
+            discovered_at: "2026-09-06T00:00:00Z".into(),
+            expires_at: "2026-09-06T00:01:00Z".into(),
+        }]),
+    )
+    .unwrap();
+    let payload = &socket.sent[0]["payload"];
+    assert_eq!(payload["status"], "succeeded");
+    assert_eq!(payload["error"], Value::Null);
+    assert_eq!(payload["output"]["receivers"][0]["display_name"], "Kitchen");
 }
 
 #[test]
@@ -286,7 +363,7 @@ fn hello_registration_and_fresh_snapshot_are_ordered() {
     send(
         &mut socket,
         "device.register",
-        json!({"device_type":"rockcast","app_version":"0","manifest":manifest()}),
+        json!({"device_type":"rockcast","app_version":"0","manifest":super::protocol::manifest()}),
     )
     .unwrap();
     wait_for(

@@ -1,5 +1,23 @@
 # RockCast tasks
 
+## DC-014 — Chromecast and relay adapters (local implementation, 2026-09-06)
+
+- [x] Advertise only `media.chromecast` (`discover`, `connect`, `disconnect`, 60-second TTL) and
+      `media.relay` (`start`, `stop`, `set_mode`, only `via_pc`) that map to the existing CastV2
+      and PC-to-Cast relay paths.
+- [x] Keep discovery receivers as opaque process-local UUID handles. Results contain only the
+      canonical receiver schema; no receiver becomes a device-control target or durable identity.
+- [x] Require a fresh handle and a selected local catalog station before Cast side effects. A
+      transition succeeds only after `PlaybackController` reports the observed Cast/local/relay
+      outcome; interrupted/failed operations return one terminal failure.
+- [x] Publish factual mutually-exclusive `output` state (`local`, `chromecast`, `relay`) and a
+      receiver ID only when RockCast knows its ephemeral handle. Server reconnects only retry an
+      undelivered terminal result, never replay hardware work.
+- [x] Cover bounded parsing, opaque cache/TTL, discovery result shape, duplicate lifecycle and
+      output capability manifest without a live LAN receiver.
+- [ ] Real Chromecast smoke remains unperformed: no configured safe receiver was used. Rockmobile
+      target UI and DC-016 remain outside RockCast.
+
 ## DC-012 — registered player transport (local implementation, 2026-09-04)
 
 - Reused the existing paired native credential and device-session renewal; no new identity, pairing,

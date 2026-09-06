@@ -1,6 +1,8 @@
 //! RockServer device-control v1 lifecycle for the local RockCast player.
 //! It publishes local facts only; remote command execution remains outside DC-012.
 
+#[path = "device_control/output.rs"]
+mod output;
 #[path = "device_control/protocol.rs"]
 mod protocol;
 #[cfg(test)]
@@ -13,14 +15,15 @@ use crate::{
     rockserver::RuntimeConfig,
     session::{AccountClient, OsCredentialStore, SessionError},
 };
+pub(crate) use output::{ChromecastDiscovery, LocalChromecastDiscovery, ReceiverCache};
 use parking_lot::Mutex;
 pub(crate) use protocol::{CommandResult, DeviceCommand, PlayerCommand, PlayerState};
 use protocol::{
-    ControlError, HEARTBEAT, Inbound, NO_IDENTITY_DELAY, POLL, PublishedState, backoff,
-    command_accepted, command_from_frame, command_result, control_endpoint, inbound_type,
-    is_auth_error, manifest, send, timestamp, wait_or_stop,
+    ControlError, HEARTBEAT, HeartbeatPayload, HelloPayload, Inbound, NO_IDENTITY_DELAY, POLL,
+    PublishedState, RegisterPayload, StateFullPayload, backoff, command_accepted,
+    command_from_frame, command_result, control_endpoint, inbound_type, is_auth_error,
+    registered_device_id, send, timestamp, wait_or_stop,
 };
-use serde_json::json;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -245,11 +248,7 @@ fn run_connection(
     mut socket: Box<dyn ControlSocket>,
 ) -> Result<(), ControlError> {
     *inner.authenticated_device_id.lock() = None;
-    send(
-        &mut *socket,
-        "protocol.hello",
-        json!({ "supported_protocol_versions": [1] }),
-    )?;
+    send(&mut *socket, "protocol.hello", HelloPayload::v1())?;
     let registration_deadline = Instant::now() + Duration::from_secs(10);
     wait_for(
         &mut *socket,
@@ -257,15 +256,7 @@ fn run_connection(
         "protocol.welcome",
         inner,
     )?;
-    send(
-        &mut *socket,
-        "device.register",
-        json!({
-            "device_type": "rockcast",
-            "app_version": env!("CARGO_PKG_VERSION"),
-            "manifest": manifest(),
-        }),
-    )?;
+    send(&mut *socket, "device.register", RegisterPayload::rockcast())?;
     wait_for(
         &mut *socket,
         registration_deadline,
@@ -292,7 +283,7 @@ fn run_connection(
             send(
                 &mut *socket,
                 "device.heartbeat",
-                json!({ "sequence": heartbeat_sequence }),
+                HeartbeatPayload::new(heartbeat_sequence),
             )?;
             heartbeat_sequence = heartbeat_sequence.saturating_add(1);
             next_heartbeat = Instant::now() + HEARTBEAT;
@@ -380,6 +371,12 @@ fn command_is_advertised(command: &PlayerCommand) -> bool {
             | PlayerCommand::PlayStream { .. }
             | PlayerCommand::SetVolume { .. }
             | PlayerCommand::ChangeVolume { .. }
+            | PlayerCommand::ChromecastDiscover
+            | PlayerCommand::ChromecastConnect { .. }
+            | PlayerCommand::ChromecastDisconnect
+            | PlayerCommand::RelayStart
+            | PlayerCommand::RelayStop
+            | PlayerCommand::RelaySetMode { .. }
     )
 }
 
@@ -423,16 +420,7 @@ fn wait_for(
             Some(Inbound::Text(text)) => match inbound_type(&text)? {
                 Some(kind) if kind == expected => {
                     if expected == "device.registered" {
-                        let device_id = serde_json::from_str::<serde_json::Value>(&text)
-                            .ok()
-                            .and_then(|value| {
-                                value
-                                    .pointer("/payload/authenticated_device_id")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                            })
-                            .filter(|id| uuid::Uuid::parse_str(id).is_ok());
-                        *inner.authenticated_device_id.lock() = device_id;
+                        *inner.authenticated_device_id.lock() = registered_device_id(&text);
                     }
                     return Ok(());
                 }
@@ -459,11 +447,7 @@ fn send_full(
     send(
         socket,
         "device.state_full",
-        json!({ "snapshot": {
-            "state_revision": revision,
-            "observed_at": current.observed_at,
-            "state": current.state.runtime_state(),
-        }}),
+        StateFullPayload::new(revision, current.observed_at, current.state.runtime_state()),
     )?;
     Ok(revision)
 }

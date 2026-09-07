@@ -44,8 +44,6 @@ pub struct CastService {
     current: Mutex<Option<(String, LiveSession)>>,
     /// Serializes play/stop so a hung LOAD cannot interleave with the next op.
     op_lock: Mutex<()>,
-    /// Set to cancel an in-flight `receive_find` (new play / stop / shutdown).
-    cancel: AtomicBool,
 }
 
 impl Default for CastService {
@@ -59,13 +57,7 @@ impl CastService {
         Self {
             current: Mutex::new(None),
             op_lock: Mutex::new(()),
-            cancel: AtomicBool::new(false),
         }
-    }
-
-    /// Interrupt an in-flight Cast wait without waiting for the operation lock.
-    pub fn cancel_pending(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
     }
 
     /// Scan for Cast devices on the local network.
@@ -97,12 +89,13 @@ impl CastService {
         url: &str,
         content_type: &str,
         title: &str,
+        cancel: &AtomicBool,
         on_status: impl Fn(&str),
     ) -> Result<(), CastError> {
-        // Abort any previous play waiting on LOAD, then take the op lock.
-        self.cancel.store(true, Ordering::SeqCst);
         let _op = self.op_lock.lock();
-        self.cancel.store(false, Ordering::SeqCst);
+        if cancel.load(Ordering::Acquire) {
+            return Err(CastError::Channel(ChannelError::Cancelled));
+        }
 
         on_status(&format!("Connecting to «{}»…", device.discovered.name));
         log::info!(
@@ -132,7 +125,7 @@ impl CastService {
             &json!({ "type": "CONNECT", "userAgent": "RockCast/0.1" }),
         )?;
 
-        let app = self.ensure_media_receiver(&channel)?;
+        let app = self.ensure_media_receiver(&channel, cancel)?;
         channel.send_json(
             &app.transport_id,
             NS_CONNECTION,
@@ -144,10 +137,10 @@ impl CastService {
         let mut last_err = None;
         let mut media_session_id = None;
         for ct in &content_types {
-            if self.cancel.load(Ordering::SeqCst) {
+            if cancel.load(Ordering::Acquire) {
                 return Err(CastError::Channel(ChannelError::Cancelled));
             }
-            match Self::load_media(&channel, &app, url, ct, title, &self.cancel) {
+            match Self::load_media(&channel, &app, url, ct, title, cancel) {
                 Ok(mid) => {
                     media_session_id = mid;
                     last_err = None;
@@ -192,7 +185,6 @@ impl CastService {
 
     pub fn stop(&self) -> Result<(), CastError> {
         log::info!("CastService::stop");
-        self.cancel.store(true, Ordering::SeqCst);
         let _op = self.op_lock.lock();
         let mut guard = self.current.lock();
         if let Some((_id, mut sess)) = guard.take() {
@@ -374,8 +366,12 @@ impl CastService {
             .map_err(Into::into)
     }
 
-    fn ensure_media_receiver(&self, channel: &CastChannel) -> Result<AppSession, CastError> {
-        if let Some(app) = self.query_dmr(channel)? {
+    fn ensure_media_receiver(
+        &self,
+        channel: &CastChannel,
+        cancel: &AtomicBool,
+    ) -> Result<AppSession, CastError> {
+        if let Some(app) = self.query_dmr(channel, cancel)? {
             return Ok(app);
         }
 
@@ -391,7 +387,7 @@ impl CastService {
         )?;
 
         channel
-            .receive_find(&self.cancel, Duration::from_secs(12), |msg| {
+            .receive_find(cancel, Duration::from_secs(12), |msg| {
                 if msg.namespace != NS_RECEIVER {
                     return Ok(None);
                 }
@@ -425,7 +421,11 @@ impl CastService {
             .map_err(Into::into)
     }
 
-    fn query_dmr(&self, channel: &CastChannel) -> Result<Option<AppSession>, CastError> {
+    fn query_dmr(
+        &self,
+        channel: &CastChannel,
+        cancel: &AtomicBool,
+    ) -> Result<Option<AppSession>, CastError> {
         let req = channel.next_request_id();
         channel.send_json(
             RECEIVER_ID,
@@ -433,7 +433,7 @@ impl CastService {
             &json!({ "type": "GET_STATUS", "requestId": req }),
         )?;
 
-        let status = channel.receive_find(&self.cancel, Duration::from_secs(8), |msg| {
+        let status = channel.receive_find(cancel, Duration::from_secs(8), |msg| {
             if msg.namespace != NS_RECEIVER {
                 return Ok(None);
             }

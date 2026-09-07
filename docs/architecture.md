@@ -19,9 +19,9 @@ Windows release builds set `#![windows_subsystem = "windows"]` (no console). Log
 └───────────────────┬───────────────────────────┬──────────────────────────┘
                     │ mpsc UiMsg                │ Arc clones
         ┌───────────▼──────────┐     ┌──────────▼──────────┐
-        │ bounded runtime      │     │ LocalPlayer         │
-        │ cast.play / stop     │     │  decode thread      │
-        │ local.play           │     │  cpal callback      │
+        │ playback runtime     │     │ LocalPlayer         │
+        │ cast/local/stop      │     │  decode thread      │
+        │ 3 bounded workers    │     │  cpal callback      │
         └───────────┬──────────┘     │  HTTP body reader   │
                     │                └─────────────────────┘
         ┌───────────▼──────────┐
@@ -30,13 +30,17 @@ Windows release builds set `#![windows_subsystem = "windows"]` (no console). Log
         │  heartbeat thread    │
         │  TLS read/write      │
         └──────────────────────┘
+
+        rockcast-io-* (4 bounded workers): catalog, icons, account, voice, discovery
+        rockcast-settings (latest-value slot): atomic settings persistence
 ```
 
 | Thread / context | Responsibilities | Must not |
 |------------------|------------------|----------|
 | UI (`eframe`) | Draw, handle clicks, adapt controller events | Block on HTTP, Cast handshake, `cpal` stream drop |
 | `PlaybackController` | Own generation/state and submit Cast/local/relay operations | Depend on egui |
-| `BackgroundRuntime` | Execute a bounded number of blocking app jobs, propagate shutdown | Create a thread per UI action |
+| Playback runtime | Execute only playback transitions and volume | Run catalog, icon, or account work |
+| I/O runtime | Execute catalog, icon, account, voice, and discovery jobs | Run playback transitions |
 | `station_icons` jobs | Fetch/decode bounded station icons and write the local cache | Perform HTTP, decode images, or touch egui from the UI thread |
 | Play worker | Call `CastService::play` or `LocalPlayer::play`, send `PlaybackEvent` | Call `local.stop()` after being superseded |
 | Stop / shutdown worker | `local.stop()`, `cast.stop()` | Hold UI |
@@ -51,6 +55,8 @@ Windows release builds set `#![windows_subsystem = "windows"]` (no console). Log
 |--------|------|-------|
 | `PlaybackController` | owns Cast/local/relay | No playback services are owned by egui state |
 | `play_generation` | `Arc<AtomicU64>` inside controller | Bumped on every play/stop/shutdown; workers ignore stale gens |
+| operation cancel | per-generation `Arc<AtomicBool>` | Changes only from active to cancelled |
+| transition lock | `Arc<Mutex<()>>` | Linearizes cross-output playback side effects |
 | `StreamObservers` | owns ICY/spectrum | Starts/stops taps outside the view layer |
 | `ui_tx` / `ui_rx` | `mpsc` | Only UI polls `ui_rx` |
 | Settings | file + dirty flag | Debounced persist |
@@ -61,12 +67,13 @@ Windows release builds set `#![windows_subsystem = "windows"]` (no console). Log
 User Play / double-click station
   → app.play()
       bump play_generation → G
-      spawn worker(G)
+      cancel previous token; create token(G); spawn playback worker(G)
+         acquire transition lock; re-check token(G)
          if device Cast:
             local.stop()
             cast.play(...)          # may wait ≤15s for LOAD; cancellable
          if device Local:
-            cast.stop()             # cancels in-flight Cast LOAD
+            cast.stop()             # clears an established Cast session
             local.play(...)         # probe ≤12s, then cpal
          if generation still G:
             UiMsg::PlayOk | Error
@@ -76,17 +83,17 @@ User Play / double-click station
 ## Control flow: Stop / exit
 
 ```text
-Stop → bump generation, spawn: local.stop(); cast.stop(); UiMsg::StopOk
-Exit → shutdown_playback (local.stop + timed cast.stop) → process::exit(0)
+Stop → bump generation, cancel active token, spawn: local.stop(); cast.stop(); UiMsg::StopOk
+Exit → cancel token + non-blocking local/relay shutdown → process::exit(0)
 ```
 
 `process::exit` is intentional: hung HTTP reader threads must not keep the process alive after the window closes.
 
 ## Cancellation rules (critical)
 
-1. **Never** let a stale play worker call `local.stop()` / tear down a newer session — check `play_generation` and return.
-2. Cast in-flight `receive_find` watches `CastService.cancel`; new `play`/`stop` sets it before taking `op_lock`.
-3. Local sessions use a **fresh** `Arc<AtomicBool>` per `play`; old sessions keep their own flag set to `true` and are not revived by the next play.
+1. A stale play worker must not tear down or install a session. Check generation and the operation token after acquiring the transition lock.
+2. Cast `receive_find`, LocalPlayer, and relay pre-buffer waits observe the same per-generation cancellation token.
+3. Cancellation tokens are never reset. A new Play creates a fresh `Arc<AtomicBool>`.
 
 ## Volume
 

@@ -207,12 +207,15 @@ impl StreamRelay {
             .unwrap_or([0.08; crate::audio::spectrum::BANDS])
     }
 
-    pub fn wait_for_pcm_format(&self, timeout: Duration) -> bool {
+    pub fn wait_for_pcm_format(&self, timeout: Duration, cancel: &AtomicBool) -> bool {
         let Some(session) = self.session.lock().as_ref().map(|s| Arc::clone(&s.fanout)) else {
             return false;
         };
         let deadline = Instant::now() + timeout;
         loop {
+            if cancel.load(Ordering::Acquire) || session.stop.load(Ordering::Acquire) {
+                return false;
+            }
             if session.pcm_format().is_some() {
                 return true;
             }
@@ -223,7 +226,7 @@ impl StreamRelay {
         }
     }
 
-    pub fn wait_for_data(&self, min_bytes: usize, timeout: Duration) -> bool {
+    pub fn wait_for_data(&self, min_bytes: usize, timeout: Duration, cancel: &AtomicBool) -> bool {
         if min_bytes == 0 {
             return true;
         }
@@ -232,6 +235,9 @@ impl StreamRelay {
         };
         let deadline = Instant::now() + timeout;
         loop {
+            if cancel.load(Ordering::Acquire) || session.stop.load(Ordering::Acquire) {
+                return false;
+            }
             let written = session.written.load(Ordering::Acquire) as usize;
             if written >= min_bytes {
                 return true;

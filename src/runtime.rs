@@ -17,10 +17,7 @@ use parking_lot::Mutex;
 
 type Job = Box<dyn FnOnce(CancelToken) + Send + 'static>;
 
-enum Command {
-    Run(Job),
-    Shutdown,
-}
+const MAX_QUEUED_JOBS: usize = 128;
 
 #[derive(Clone)]
 pub struct CancelToken(Arc<AtomicBool>);
@@ -32,15 +29,19 @@ impl CancelToken {
 }
 
 pub struct BackgroundRuntime {
-    tx: mpsc::Sender<Command>,
+    tx: Option<mpsc::SyncSender<Job>>,
     cancelled: Arc<AtomicBool>,
     workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl BackgroundRuntime {
     pub fn new(worker_count: usize) -> Self {
+        Self::new_named(worker_count, "rockcast-bg")
+    }
+
+    pub fn new_named(worker_count: usize, thread_name: &str) -> Self {
         let worker_count = worker_count.max(2);
-        let (tx, rx) = mpsc::channel::<Command>();
+        let (tx, rx) = mpsc::sync_channel::<Job>(MAX_QUEUED_JOBS);
         let rx = Arc::new(Mutex::new(rx));
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(worker_count);
@@ -48,19 +49,23 @@ impl BackgroundRuntime {
         for index in 0..worker_count {
             let rx = Arc::clone(&rx);
             let cancelled = Arc::clone(&cancelled);
+            let name = format!("{thread_name}-{index}");
             workers.push(
                 thread::Builder::new()
-                    .name(format!("rockcast-bg-{index}"))
+                    .name(name)
                     .spawn(move || {
                         loop {
-                            let command = rx.lock().recv();
-                            match command {
-                                Ok(Command::Run(job)) => {
+                            // Keep the receiver mutex strictly around recv. A
+                            // temporary guard in the `match` scrutinee lives to
+                            // the end of the match and would serialize all jobs.
+                            let received = { rx.lock().recv() };
+                            match received {
+                                Ok(job) => {
                                     if !cancelled.load(Ordering::Acquire) {
                                         job(CancelToken(Arc::clone(&cancelled)));
                                     }
                                 }
-                                Ok(Command::Shutdown) | Err(_) => break,
+                                Err(_) => break,
                             }
                         }
                     })
@@ -69,7 +74,7 @@ impl BackgroundRuntime {
         }
 
         Self {
-            tx,
+            tx: Some(tx),
             cancelled,
             workers,
         }
@@ -83,8 +88,13 @@ impl BackgroundRuntime {
             return Err("runtime is shutting down");
         }
         self.tx
-            .send(Command::Run(Box::new(job)))
-            .map_err(|_| "runtime workers stopped")
+            .as_ref()
+            .ok_or("runtime is shutting down")?
+            .try_send(Box::new(job))
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => "runtime queue is full",
+                mpsc::TrySendError::Disconnected(_) => "runtime workers stopped",
+            })
     }
 
     pub fn cancel_token(&self) -> CancelToken {
@@ -95,9 +105,7 @@ impl BackgroundRuntime {
         if self.cancelled.swap(true, Ordering::AcqRel) {
             return;
         }
-        for _ in 0..self.workers.len() {
-            let _ = self.tx.send(Command::Shutdown);
-        }
+        self.tx.take();
         // Blocking HTTP implementations may still be inside an OS read. Do not
         // join here: window close must remain bounded. Workers observe the token
         // before accepting another job and the process exit remains the final
@@ -127,5 +135,28 @@ mod tests {
         runtime.shutdown();
         assert!(token.is_cancelled());
         assert!(runtime.spawn(|_| {}).is_err());
+    }
+
+    #[test]
+    fn workers_execute_jobs_concurrently() {
+        let mut runtime = BackgroundRuntime::new(2);
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (second_done_tx, second_done_rx) = mpsc::channel();
+        runtime
+            .spawn(move |_| {
+                first_started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .unwrap();
+        first_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        runtime
+            .spawn(move |_| second_done_tx.send(()).unwrap())
+            .unwrap();
+        second_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_tx.send(()).unwrap();
+        runtime.shutdown();
     }
 }

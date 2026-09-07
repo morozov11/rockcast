@@ -64,6 +64,7 @@ struct ClientInner {
 }
 
 const MAX_DEDUPED_COMMANDS: usize = 64;
+const MAX_PENDING_COMMANDS: usize = 64;
 
 struct CommandBook {
     queued: VecDeque<DeviceCommand>,
@@ -192,9 +193,7 @@ impl DeviceControlClient {
 
     pub(crate) fn shutdown(&self) {
         self.inner.stopped.store(true, Ordering::Release);
-        if let Some(worker) = self.inner.worker.lock().take() {
-            let _ = worker.join();
-        }
+        self.inner.worker.lock().take();
     }
 
     /// The UI thread remains the sole PlaybackController owner.
@@ -209,6 +208,10 @@ impl DeviceControlClient {
 
     pub(crate) fn complete_command(&self, command_id: &str, result: CommandResult) {
         self.inner.commands.lock().complete(command_id, result);
+    }
+
+    pub(crate) fn has_queued_commands(&self) -> bool {
+        !self.inner.commands.lock().queued.is_empty()
     }
 }
 
@@ -292,9 +295,7 @@ fn run_connection(
             socket.close();
             return Ok(());
         }
-        if let Some(current) = inner.state.lock().clone()
-            && current.revision > sent_revision
-        {
+        if state_is_newer_than(&inner.state, sent_revision) {
             sent_revision = send_full(&mut *socket, inner, sent_revision)?;
         }
         if Instant::now() >= next_heartbeat {
@@ -329,6 +330,11 @@ fn run_connection(
             },
         }
     }
+}
+
+fn state_is_newer_than(state: &Mutex<Option<PublishedState>>, sent_revision: u64) -> bool {
+    let revision = { state.lock().as_ref().map(|current| current.revision) };
+    revision.is_some_and(|revision| revision > sent_revision)
 }
 
 fn receive_command(
@@ -367,11 +373,24 @@ fn receive_command(
         return Ok(());
     }
     if let Some((result, delivered)) = commands.completed.get_mut(&command.id) {
-        if !*delivered {
-            command_result(socket, &command.id, result)?;
+        if *delivered {
+            return Ok(());
+        }
+        let result = result.clone();
+        drop(commands);
+        command_result(socket, &command.id, &result)?;
+        if let Some((_, delivered)) = inner.commands.lock().completed.get_mut(&command.id) {
             *delivered = true;
         }
         return Ok(());
+    }
+    if commands.queued.len() + commands.in_flight.len() >= MAX_PENDING_COMMANDS {
+        drop(commands);
+        return command_result(
+            socket,
+            &command.id,
+            &CommandResult::failed("command_timeout", "Device command queue is full"),
+        );
     }
     commands.queued.push_back(command.clone());
     drop(commands);

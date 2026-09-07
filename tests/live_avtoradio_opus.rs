@@ -65,7 +65,7 @@ fn live_relay_decodes_avtoradio_opus_into_wav() {
 
     assert_eq!(content_type, "audio/wav");
     assert!(
-        relay.wait_for_data(32 * 1024, Duration::from_secs(15)),
+        relay.wait_for_data(32 * 1024, Duration::from_secs(15), &cancel),
         "relay did not decode enough PCM from live opus stream"
     );
 

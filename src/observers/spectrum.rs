@@ -72,22 +72,9 @@ impl SpectrumAnalyzer {
 
     pub fn stop_async(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(j) = self.join.take() {
-            join_observer_worker(j, "spectrum");
-        }
+        // Never join from egui; the worker observes `stop` and cleans itself up.
+        self.join.take();
         *self.levels.lock() = [0.08; SPECTRUM_BANDS];
-    }
-}
-
-fn join_observer_worker(j: thread::JoinHandle<()>, label: &str) {
-    let (done_tx, done_rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _worker = crate::profile::worker("spectrum_join");
-        let _ = j.join();
-        let _ = done_tx.send(());
-    });
-    if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
-        log::warn!("observer {label} worker did not exit within 2s");
     }
 }
 

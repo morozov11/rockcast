@@ -20,7 +20,7 @@ impl RockCastApp {
             let station = station.clone();
             let request_key_for_job = request_key.clone();
             let root = root.clone();
-            let result = self.playback.spawn_job(move |cancel| {
+            let result = self.background.spawn(move |cancel| {
                 if cancel.is_cancelled() {
                     return;
                 }

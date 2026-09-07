@@ -5,9 +5,11 @@ mod volume;
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
+
+use parking_lot::Mutex;
 
 use crate::{
     cast::CastService, local::LocalPlayer, output::OutputDevice, relay::StreamRelay,
@@ -23,6 +25,8 @@ pub struct PlaybackController {
     relay: Arc<StreamRelay>,
     runtime: BackgroundRuntime,
     generation: Arc<AtomicU64>,
+    operation_cancel: Arc<AtomicBool>,
+    transition: Arc<Mutex<()>>,
     phase: PlaybackPhase,
     event_tx: mpsc::Sender<PlaybackEvent>,
     event_rx: mpsc::Receiver<PlaybackEvent>,
@@ -35,8 +39,10 @@ impl PlaybackController {
             cast: Arc::new(CastService::new()),
             local: Arc::new(LocalPlayer::new()),
             relay: Arc::new(StreamRelay::new()),
-            runtime: BackgroundRuntime::new(6),
+            runtime: BackgroundRuntime::new_named(3, "rockcast-playback"),
             generation: Arc::new(AtomicU64::new(0)),
+            operation_cancel: Arc::new(AtomicBool::new(true)),
+            transition: Arc::new(Mutex::new(())),
             phase: PlaybackPhase::Idle,
             event_tx,
             event_rx,
@@ -92,7 +98,9 @@ impl PlaybackController {
         spectrum_enabled: bool,
     ) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.cast.cancel_pending();
+        self.operation_cancel.store(true, Ordering::Release);
+        let operation_cancel = Arc::new(AtomicBool::new(false));
+        self.operation_cancel = Arc::clone(&operation_cancel);
         let local_output = device.is_local();
         self.phase = PlaybackPhase::Opening {
             generation,
@@ -103,13 +111,16 @@ impl PlaybackController {
         let cast = Arc::clone(&self.cast);
         let local = Arc::clone(&self.local);
         let relay = Arc::clone(&self.relay);
+        let transition = Arc::clone(&self.transition);
         let play_generation = Arc::clone(&self.generation);
         let (title_tx, title_rx) = mpsc::channel();
         if local_output {
             let title_events = self.event_tx.clone();
             let title_generation = Arc::clone(&self.generation);
+            let title_cancel = Arc::clone(&operation_cancel);
             let _ = self.runtime.spawn(move |cancel| {
                 while !cancel.is_cancelled()
+                    && !title_cancel.load(Ordering::Acquire)
                     && title_generation.load(Ordering::Acquire) == generation
                 {
                     match title_rx.recv_timeout(std::time::Duration::from_millis(200)) {
@@ -123,24 +134,32 @@ impl PlaybackController {
                 }
             });
         }
-        let submit = self.runtime.spawn(move |runtime_cancel| match device {
+        let submit = self.runtime.spawn(move |runtime_cancel| {
+            let _transition = transition.lock();
+            if runtime_cancel.is_cancelled()
+                || operation_cancel.load(Ordering::Acquire)
+                || play_generation.load(Ordering::Acquire) != generation
+            {
+                return;
+            }
+            match device {
             OutputDevice::Cast(cast_dev) => {
                 local.stop();
                 relay.stop();
                 if runtime_cancel.is_cancelled()
+                    || operation_cancel.load(Ordering::Acquire)
                     || play_generation.load(Ordering::Acquire) != generation
                 {
                     return;
                 }
 
-                let cancel = std::sync::atomic::AtomicBool::new(false);
                 let mut relay_owned = false;
                 let (load_url, load_ct) = if use_relay {
                     match relay.start(
                         &station.url,
                         &cast_dev.discovered.host,
                         station.content_type(),
-                        &cancel,
+                        &operation_cancel,
                     ) {
                         Ok(value) => {
                             relay_owned = true;
@@ -167,10 +186,16 @@ impl PlaybackController {
                     };
                     let format_timeout = std::time::Duration::from_secs(12);
                     let buffer_timeout = std::time::Duration::from_secs(12);
-                    if load_ct.contains("wav") && !relay.wait_for_pcm_format(format_timeout) {
+                    if load_ct.contains("wav")
+                        && !relay.wait_for_pcm_format(format_timeout, &operation_cancel)
+                    {
                         log::warn!("relay pre-buffer: PCM format not ready within {format_timeout:?}");
                     }
-                    if !relay.wait_for_data(min_bytes, buffer_timeout) {
+                    if !relay.wait_for_data(min_bytes, buffer_timeout, &operation_cancel) {
+                        if operation_cancel.load(Ordering::Acquire) {
+                            relay.stop();
+                            return;
+                        }
                         let _ = tx.send(PlaybackEvent::Error {
                             message: format!(
                                 "station unavailable: relay produced no audio within {buffer_timeout:?}"
@@ -183,6 +208,7 @@ impl PlaybackController {
                 }
 
                 if runtime_cancel.is_cancelled()
+                    || operation_cancel.load(Ordering::Acquire)
                     || play_generation.load(Ordering::Acquire) != generation
                 {
                     if relay_owned {
@@ -190,14 +216,21 @@ impl PlaybackController {
                     }
                     return;
                 }
-                let result = cast.play(&cast_dev, &load_url, &load_ct, &station.name, |status| {
-                    if play_generation.load(Ordering::Acquire) == generation {
-                        let _ = tx.send(PlaybackEvent::Status {
-                            text: status.to_string(),
-                            generation,
-                        });
-                    }
-                });
+                let result = cast.play(
+                    &cast_dev,
+                    &load_url,
+                    &load_ct,
+                    &station.name,
+                    &operation_cancel,
+                    |status| {
+                        if play_generation.load(Ordering::Acquire) == generation {
+                            let _ = tx.send(PlaybackEvent::Status {
+                                text: status.to_string(),
+                                generation,
+                            });
+                        }
+                    },
+                );
                 if play_generation.load(Ordering::Acquire) != generation {
                     return;
                 }
@@ -231,6 +264,7 @@ impl PlaybackController {
                 relay.stop();
                 let _ = cast.stop();
                 if runtime_cancel.is_cancelled()
+                    || operation_cancel.load(Ordering::Acquire)
                     || play_generation.load(Ordering::Acquire) != generation
                 {
                     return;
@@ -240,6 +274,7 @@ impl PlaybackController {
                     &station.url,
                     local_volume(volume),
                     spectrum_enabled,
+                    Arc::clone(&operation_cancel),
                     Some(title_tx),
                     |status| {
                         if play_generation.load(Ordering::Acquire) == generation {
@@ -274,6 +309,7 @@ impl PlaybackController {
                     }
                 }
             }
+        }
         });
 
         if let Err(e) = submit {
@@ -288,12 +324,15 @@ impl PlaybackController {
 
     pub fn stop(&mut self) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.operation_cancel.store(true, Ordering::Release);
         self.phase = PlaybackPhase::Stopping { generation };
         let tx = self.event_tx.clone();
         let cast = Arc::clone(&self.cast);
         let local = Arc::clone(&self.local);
         let relay = Arc::clone(&self.relay);
+        let transition = Arc::clone(&self.transition);
         if let Err(e) = self.runtime.spawn(move |_| {
+            let _transition = transition.lock();
             local.stop();
             relay.stop();
             match cast.stop() {
@@ -328,13 +367,6 @@ impl PlaybackController {
         });
     }
 
-    pub fn spawn_job(
-        &self,
-        job: impl FnOnce(crate::runtime::CancelToken) + Send + 'static,
-    ) -> Result<(), &'static str> {
-        self.runtime.spawn(job)
-    }
-
     pub fn apply_event(&mut self, event: &PlaybackEvent) -> bool {
         let generation = match event {
             PlaybackEvent::Status { generation, .. }
@@ -361,9 +393,9 @@ impl PlaybackController {
 
     pub fn shutdown(&mut self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.operation_cancel.store(true, Ordering::Release);
         self.local.stop();
         self.relay.stop();
-        self.cast.cancel_pending();
         self.runtime.shutdown();
         self.phase = PlaybackPhase::Idle;
     }

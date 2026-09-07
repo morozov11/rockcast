@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const WINDOW_TITLES: [&str; 2] = [
+    "RockCast — радио локально / Chromecast",
+    "RockCast — local radio / Chromecast",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Lang {
@@ -57,6 +62,7 @@ pub struct Strings {
     pub loading_stations_status: &'static str,
     pub searching_devices: &'static str,
     pub scan_panic: &'static str,
+    pub background_busy: &'static str,
     pub pick_station: &'static str,
     pub pick_device: &'static str,
     pub connecting: &'static str,
@@ -118,7 +124,7 @@ pub struct Strings {
 }
 
 pub static RU: Strings = Strings {
-    window_title: "RockCast — радио локально / Chromecast",
+    window_title: WINDOW_TITLES[0],
     subtitle: "Рок и металл — локально или на Chromecast",
     menu_language: "Язык",
     device: "Устройство",
@@ -148,6 +154,7 @@ pub static RU: Strings = Strings {
     loading_stations_status: "Загрузка станций…",
     searching_devices: "Поиск устройств (локальные + Chromecast)…",
     scan_panic: "Ошибка поиска устройств. Нажмите «Найти акустику» ещё раз.",
+    background_busy: "Фоновые задачи заняты. Повторите действие.",
     pick_station: "Выберите радиостанцию в списке.",
     pick_device: "Сначала выберите устройство (локальные динамики или Cast).",
     connecting: "Подключение…",
@@ -209,7 +216,7 @@ pub static RU: Strings = Strings {
 };
 
 pub static EN: Strings = Strings {
-    window_title: "RockCast — local radio / Chromecast",
+    window_title: WINDOW_TITLES[1],
     subtitle: "Rock and metal — local speakers or Chromecast",
     menu_language: "Language",
     device: "Device",
@@ -239,6 +246,7 @@ pub static EN: Strings = Strings {
     loading_stations_status: "Loading stations…",
     searching_devices: "Searching devices (local + Chromecast)…",
     scan_panic: "Device scan failed. Press Find again.",
+    background_busy: "Background tasks are busy. Try again.",
     pick_station: "Select a radio station from the list.",
     pick_device: "Select a device first (PC speakers or Cast).",
     connecting: "Connecting…",

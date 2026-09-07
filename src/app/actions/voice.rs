@@ -22,22 +22,30 @@ impl RockCastApp {
         let rockserver = self.rockserver.clone();
         // Voice commands are currently Russian regardless of UI translation.
         let locale = "ru-RU".to_owned();
-        let _ = self.playback.spawn_job(move |_| {
-            let bearer_token = crate::session::AccountClient::new(
-                rockserver.clone(),
-                crate::session::OsCredentialStore,
-            )
-            .voice_access_token()
-            .ok()
-            .flatten();
-            let _ = tx.send(UiMsg::VoiceResult(crate::voice::capture_and_recognize(
-                rockserver.base_url(),
-                bearer_token.as_deref().or(rockserver.bearer_token()),
-                &locale,
-                rockserver.recognizer_mode(),
-                recording,
-            )));
-        });
+        if self
+            .background
+            .spawn(move |_| {
+                let bearer_token = crate::session::AccountClient::new(
+                    rockserver.clone(),
+                    crate::session::OsCredentialStore,
+                )
+                .voice_access_token()
+                .ok()
+                .flatten();
+                let _ = tx.send(UiMsg::VoiceResult(crate::voice::capture_and_recognize(
+                    rockserver.base_url(),
+                    bearer_token.as_deref().or(rockserver.bearer_token()),
+                    &locale,
+                    rockserver.recognizer_mode(),
+                    recording,
+                )));
+            })
+            .is_err()
+        {
+            self.voice_busy = false;
+            self.voice_recording = None;
+            self.status = self.lang.t().background_busy.into();
+        }
     }
 
     pub(in crate::app) fn stop_voice_recording(&mut self) {

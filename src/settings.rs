@@ -4,6 +4,10 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    sync::mpsc,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +43,86 @@ pub struct AppSettings {
     pub cast_relay: bool,
     #[serde(default)]
     pub language: crate::i18n::Lang,
+}
+
+enum SaveCommand {
+    Save,
+    Flush(mpsc::Sender<()>),
+}
+
+pub struct SettingsWriter {
+    tx: mpsc::SyncSender<SaveCommand>,
+    pending: Arc<Mutex<Option<AppSettings>>>,
+}
+
+impl SettingsWriter {
+    pub fn new() -> Self {
+        // One wake-up is enough: the shared slot always contains the latest
+        // snapshot, so rapid UI changes coalesce without growing a queue.
+        let (tx, rx) = mpsc::sync_channel(1);
+        let pending = Arc::new(Mutex::new(None::<AppSettings>));
+        let writer_pending = Arc::clone(&pending);
+        thread::Builder::new()
+            .name("rockcast-settings".into())
+            .spawn(move || {
+                while let Ok(command) = rx.recv() {
+                    match command {
+                        SaveCommand::Save => {
+                            let settings = { writer_pending.lock().unwrap().take() };
+                            if let Some(settings) = settings
+                                && let Err(error) = settings.save()
+                            {
+                                log::warn!("failed to persist settings: {error}");
+                            }
+                        }
+                        SaveCommand::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .expect("spawn settings writer");
+        Self { tx, pending }
+    }
+
+    pub fn save(&self, settings: AppSettings) -> Result<(), &'static str> {
+        *self.pending.lock().unwrap() = Some(settings);
+        match self.tx.try_send(SaveCommand::Save) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err("settings writer stopped"),
+        }
+    }
+
+    pub fn flush(&self) {
+        const TIMEOUT: Duration = Duration::from_secs(2);
+        let deadline = Instant::now() + TIMEOUT;
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut flush = SaveCommand::Flush(done_tx);
+        loop {
+            match self.tx.try_send(flush) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Full(command)) if Instant::now() < deadline => {
+                    flush = command;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(mpsc::TrySendError::Full(_)) => {
+                    log::warn!("settings writer queue did not drain within {TIMEOUT:?}");
+                    return;
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if done_rx.recv_timeout(remaining).is_err() {
+            log::warn!("settings writer did not flush within {TIMEOUT:?}");
+        }
+    }
+}
+
+impl Default for SettingsWriter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn default_volume() -> u8 {

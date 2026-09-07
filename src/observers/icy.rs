@@ -61,27 +61,15 @@ impl IcyWatcher {
     /// Stops the watcher without blocking the UI thread for long.
     pub fn stop_async(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(j) = self.join.take() {
-            let (done_tx, done_rx) = mpsc::channel();
-            thread::spawn(move || {
-                let _worker = crate::profile::worker("icy_join");
-                let _ = j.join();
-                let _ = done_tx.send(());
-            });
-            if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
-                log::warn!("icy watcher did not exit within 2s");
-            }
-        }
+        // Dropping a JoinHandle detaches it. The reader owns its resources and
+        // exits after observing `stop` or its bounded network read timeout.
+        self.join.take();
     }
 }
 
 impl Drop for IcyWatcher {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(j) = self.join.take() {
-            // On exit wait briefly, but not forever.
-            let _ = j.join();
-        }
+        self.stop_async();
     }
 }
 
@@ -171,4 +159,19 @@ fn read_interruptible(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_never_waits_for_the_reader_thread() {
+        let mut watcher = IcyWatcher::new();
+        watcher.stop = Arc::new(AtomicBool::new(false));
+        watcher.join = Some(thread::spawn(|| thread::sleep(Duration::from_millis(250))));
+        let started = Instant::now();
+        watcher.stop_async();
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
 }

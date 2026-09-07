@@ -17,13 +17,15 @@ Every `play`, `stop`, and `shutdown_playback` does roughly:
 generation = play_generation.fetch_add(1) + 1
 ```
 
-Workers capture `generation` at spawn time. Before applying side effects or sending `PlayOk`/`Error`, they compare to the current atomic. Stale workers **return without** calling `local.stop()`.
+Workers capture `generation` and a fresh `Arc<AtomicBool>` cancellation token. A newer Play, Stop,
+or shutdown permanently cancels that token. Before applying side effects or sending
+`PlayOk`/`Error`, workers compare the generation and token after acquiring the transition lock.
 
 ## Local path (`LocalPlayer`)
 
 ### API
 
-- `play(device, url, volume, title_tx, on_status) -> Result<(), LocalError>`
+- `play(device, url, volume, spectrum_enabled, stop, title_tx, …) -> Result<(), LocalError>`
 - `stop()` — sets current session stop flag; drops cpal stream + joins decode **off** the caller thread
 - `set_volume` / `levels` — lock-free-ish atomics / mutex for UI EQ
 
@@ -60,23 +62,26 @@ Each `play` installs a **new** `Arc<AtomicBool>` into `session_stop`. Prior sess
 
 ### API
 
-- `play(device, url, content_type, title, on_status)`
+- `play(device, url, content_type, title, cancel, on_status)`
 - `stop()`
 - `set_volume_current(level 0..=1)`
 
 Internally:
 
-1. `cancel = true` then acquire `op_lock` (aborts previous LOAD wait)
-2. `cancel = false`
-3. Reuse or open `CastChannel` (`take_or_connect`)
-4. CONNECT → ensure Default Media Receiver → LOAD (try station content-type then `audio/mpeg`)
-5. Start heartbeat; store `LiveSession` in `current`
+1. The controller cancels the preceding immutable operation token.
+2. The worker acquires the playback transition lock and rechecks generation/token.
+3. `CastService::play` acquires its device `op_lock` and rechecks the caller-owned token.
+4. Reuse or open `CastChannel` (`take_or_connect`).
+5. CONNECT → ensure Default Media Receiver → LOAD (try station content-type then `audio/mpeg`).
+6. Start heartbeat; store `LiveSession` in `current`.
 
-`receive_find` uses a **wall-clock** overall timeout (LOAD ~15s) and checks `cancel` every ~500ms read.
+`receive_find` uses a **wall-clock** overall timeout (LOAD ~15s) and checks the operation token
+every ~500ms read. Tokens are never reset, so an old LOAD cannot become active again.
 
 ### After PlayOk (UI)
 
-- Cast: schedule delayed `IcyWatcher` + optional `SpectrumAnalyzer` tap on the **original** station URL (not the LAN relay URL)
+- Direct Cast: schedule delayed `IcyWatcher` + optional `SpectrumAnalyzer` tap on the original station URL
+- Via-PC Cast: titles and spectrum use the already-running relay/tap rather than downloading the station twice
 - Local: titles/levels already from `LocalPlayer` — no extra tap
 
 ## Cast relay (Via PC)

@@ -1,5 +1,61 @@
 # RockCast status
 
+## Single Windows instance (2026-09-08)
+
+RockCast now claims a named mutex before logging or application initialization. A second launch
+therefore exits cleanly without truncating the running instance's log. It waits briefly for an
+instance that is still creating its native window, restores that window if minimized, and asks
+Windows to place it in the foreground. Both Russian and English window titles come from the same
+i18n constants used by the UI, so changing a title cannot silently break activation.
+
+The rebuilt debug executable was exercised in five consecutive two-process Windows runs. Each time
+the first window was minimized, the second process exited with code 0, exactly the original PID
+remained, and its window was both restored and reported by Windows as the foreground window. The
+activation temporarily attaches to the current foreground input queue because Windows can reject a
+plain `SetForegroundWindow` call from a background process; an initial smoke run reproduced that
+OS restriction before this hardening.
+
+## Play/Stop concurrency repair (2026-09-08)
+
+The GUI hang had two concrete causes. `StreamObservers::stop` synchronously waited up to two
+seconds for each of the ICY and spectrum readers while running on egui, which could stop Windows
+message processing for about four seconds. Separately, `match rx.lock().recv()` kept the background
+runtime's receiver mutex through execution of the selected match arm, silently serializing the
+worker pool whenever a job blocked.
+
+A subsequent physical GUI run found a third instance of the same Rust temporary lifetime trap.
+The device-control loop retained `state.lock()` through an `if let` body and called `send_full`,
+which attempted to acquire `state` again. On the first Play state publication, the connection
+worker self-deadlocked and egui then blocked in `DeviceControlClient::publish`. The snapshot is now
+extracted in its own scope before any send. The settings writer was hardened against the same
+pattern so disk I/O cannot retain its pending-slot mutex.
+
+Observer stop now only cancels and detaches the old reader. The receiver guard is scoped to
+`recv`, and a deterministic test proves a second worker completes while the first remains blocked.
+Playback has a dedicated bounded runtime, an immutable cancellation token per generation, and a
+transition lock that linearizes teardown/start while remaining cancellable. Catalog, icons,
+account, voice, pairing, and discovery use a separate bounded I/O runtime. Relay pre-buffer waits
+observe cancellation. Settings persistence uses a latest-value slot and one-item wake queue rather
+than filesystem sync on egui. Remote commands have a 64-item admission limit, process at most 16
+per frame, and never hold their ledger mutex during a WebSocket send; device-control shutdown no
+longer joins its network worker from window close.
+
+Checks: `cargo fmt`, `cargo check --all-targets`, strict Clippy including
+`clippy::significant_drop_in_scrutinee`, the new concurrency/observer/state/queue regressions, and
+the full non-live suite passed (120 unit tests with one environment-specific DPAPI test filtered,
+plus 2 integration tests; live network tests remain ignored). The unfiltered run's only remaining
+failure is the pre-existing
+`legacy_dpapi_blob_is_an_absent_session_not_a_storage_failure`, because this execution identity has
+no interactive Windows user DPAPI key.
+
+The rebuilt debug executable was then exercised through its real Windows UI Automation tree.
+Local Play/Stop completed with 0 failed window-message pings (100 samples during Play, 60 during
+Stop; worst 22/7 ms). Eight rapid Play→Stop cycles during HTTP probe also had 0 failures (worst
+17 ms). A physical `Главная спальня` Chromecast completed relay, CastV2 LOAD to `PLAYING`, and STOP
+with 0 failed pings (180/80 samples; worst 21/15 ms). WM_CLOSE exited in 84 ms. A new physical
+RockMobile command was not injected during this run; its server path remains covered by the prior
+DC-016 paired-mobile acceptance below.
+
 ## DC-016 — idle command wake-up and live E2E acceptance (2026-09-07)
 
 When RockCast was idle, its device-control worker could enqueue `device.command` while egui had

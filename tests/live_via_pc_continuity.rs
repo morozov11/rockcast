@@ -69,7 +69,7 @@ fn live_via_pc_stream_stays_alive_for_twenty_seconds_and_feeds_spectrum() {
     assert_ne!(tap_url, public_url);
     assert!(tap_url.ends_with("/tap"));
     assert!(
-        relay.wait_for_data(64 * 1024, Duration::from_secs(15)),
+        relay.wait_for_data(64 * 1024, Duration::from_secs(15), &cancel),
         "relay never produced enough decoded PCM"
     );
 

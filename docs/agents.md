@@ -31,12 +31,12 @@ Desktop **internet radio** app (Windows + Linux): egui UI, local cpal playback (
 
 1. **UI never blocks** on HTTP, Cast LOAD, decode join, or cpal stream drop.
 2. **`PlaybackController` generation:** stale workers must not `local.stop()` or apply UI success/title for an old generation.
-3. **`CastService` is `Arc<CastService>`** with internal `op_lock` + `cancel` — do not reintroduce `Arc<Mutex<CastService>>` held across `play()`.
-4. **Local session stop flags are per-play `Arc<AtomicBool>`** — never reset a shared flag to `false` to “reuse” an old hung decode.
+3. **`CastService` is `Arc<CastService>`** with an internal `op_lock` and a caller-owned per-generation cancellation token — do not reintroduce `Arc<Mutex<CastService>>` held across `play()`.
+4. **Cancellation flags are per-play `Arc<AtomicBool>`** shared by playback orchestration and LocalPlayer — never reset an old token to `false`.
 5. **Error messages in `thiserror` / `Err(String)` are English.** UI copy stays in `i18n.rs`.
 6. **Release exit:** `shutdown_playback` then `std::process::exit(0)` so orphaned HTTP threads cannot hang the process.
 7. **Cast relay advertise IP** must be a real LAN NIC near the speaker — never a VPN/tunnel address.
-8. **App-level blocking jobs use `BackgroundRuntime`;** do not add fire-and-forget threads to `app/`.
+8. **Playback and general I/O use separate bounded `BackgroundRuntime` instances;** do not submit catalog/icon/account work to the playback runtime.
 
 ## Known footguns (from production bugs)
 

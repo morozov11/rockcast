@@ -57,8 +57,8 @@ impl RockCastApp {
         let tx = self.ui_tx.clone();
         let config = self.rockserver.clone();
         if self
-            .playback
-            .spawn_job(move |_| {
+            .background
+            .spawn(move |_| {
                 let client = AccountClient::new(config, OsCredentialStore);
                 let result = client.load_account_session();
                 let _ = tx.send(super::super::messages::UiMsg::AccountLoaded(result));
@@ -84,8 +84,8 @@ impl RockCastApp {
         let tx = self.ui_tx.clone();
         let config = self.rockserver.clone();
         if self
-            .playback
-            .spawn_job(move |_| {
+            .background
+            .spawn(move |_| {
                 let result = AccountClient::new(config, OsCredentialStore).create_pairing(&name);
                 let _ = tx.send(super::super::messages::UiMsg::PairingStarted { name, result });
             })

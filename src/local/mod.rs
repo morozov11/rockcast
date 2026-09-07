@@ -126,6 +126,7 @@ impl LocalPlayer {
         url: &str,
         volume: f32,
         spectrum_enabled: bool,
+        stop: Arc<AtomicBool>,
         title_tx: Option<mpsc::Sender<String>>,
         on_status: impl Fn(&str),
         on_started: impl FnOnce(),
@@ -139,11 +140,13 @@ impl LocalPlayer {
         log::debug!("LocalPlayer::play: waiting play_lock");
         let _play_guard = self.play_lock.lock();
         log::debug!("LocalPlayer::play: play_lock acquired");
+        if stop.load(Ordering::Acquire) {
+            return Err(LocalError::Stream("stopped".into()));
+        }
 
         self.set_volume(volume);
         on_status(&format!("Local: «{}»...", device.name));
 
-        let stop = Arc::new(AtomicBool::new(false));
         *self.session_stop.lock() = Arc::clone(&stop);
         *self.levels.lock() = [0.08; BANDS];
 
@@ -207,7 +210,8 @@ impl LocalPlayer {
         // Wait for probe without holding the state mutex — stop() can interrupt.
         let deadline = Instant::now() + OPEN_TIMEOUT;
         while Instant::now() < deadline {
-            if let Some(e) = err_slot.lock().clone() {
+            let decode_error = { err_slot.lock().clone() };
+            if let Some(e) = decode_error {
                 log::error!("LocalPlayer::play: decode error while waiting probe: {e}");
                 self.stop();
                 return Err(LocalError::Stream(e));
@@ -329,7 +333,8 @@ impl LocalPlayer {
                 self.stop();
                 return Err(LocalError::Stream("stopped".into()));
             }
-            if let Some(e) = err_slot.lock().clone() {
+            let decode_error = { err_slot.lock().clone() };
+            if let Some(e) = decode_error {
                 log::error!("LocalPlayer::play: decode error during pre-buffer: {e}");
                 self.stop();
                 return Err(LocalError::Stream(e));
@@ -409,7 +414,8 @@ impl LocalPlayer {
             self.stop();
             return Err(LocalError::Stream("stopped".into()));
         }
-        if let Some(e) = err_slot.lock().clone() {
+        let decode_error = { err_slot.lock().clone() };
+        if let Some(e) = decode_error {
             log::error!("LocalPlayer::play: error after start: {e}");
             self.stop();
             return Err(LocalError::Stream(e));
@@ -419,7 +425,8 @@ impl LocalPlayer {
             if stop.load(Ordering::SeqCst) {
                 return Err(LocalError::Stream("stopped".into()));
             }
-            if let Some(e) = err_slot.lock().clone() {
+            let decode_error = { err_slot.lock().clone() };
+            if let Some(e) = decode_error {
                 log::error!("LocalPlayer::play: stream ended after start: {e}");
                 self.stop();
                 return Err(LocalError::Stream(e));

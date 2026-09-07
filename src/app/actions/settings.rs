@@ -69,8 +69,8 @@ impl RockCastApp {
         }
         self.settings_dirty = false;
         self.last_settings_save = Instant::now();
-        if let Err(e) = self.settings.save() {
-            log::warn!("failed to persist settings: {e}");
+        if let Err(error) = self.settings_writer.save(self.settings.clone()) {
+            log::warn!("failed to queue settings save: {error}");
         }
     }
 

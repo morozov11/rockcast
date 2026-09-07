@@ -127,7 +127,7 @@ impl RelayHarness {
         assert_eq!(content_type, "audio/wav");
         let tap_url = relay.tap_url().expect("tap url");
         assert!(
-            relay.wait_for_data(64 * 1024, Duration::from_secs(20)),
+            relay.wait_for_data(64 * 1024, Duration::from_secs(20), &cancel),
             "relay never produced decoded PCM"
         );
         let consumer_stop = Arc::new(AtomicBool::new(false));

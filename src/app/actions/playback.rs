@@ -10,6 +10,8 @@ use time::OffsetDateTime;
 
 use super::super::RockCastApp;
 
+const MAX_REMOTE_COMMANDS_PER_FRAME: usize = 16;
+
 #[derive(Debug, PartialEq, Eq)]
 enum RemoteCommandPlan {
     PlaySelected,
@@ -113,8 +115,9 @@ impl RockCastApp {
         self.playing_url = None;
         self.mark_settings_dirty();
         self.persist_settings_if_needed(true);
-        // Stop local first (non-blocking). Cast STOP is best-effort with a short wait
-        // so a hung Cast handshake cannot freeze window close.
+        self.settings_writer.flush();
+        // Local and relay stop are non-blocking. Process exit is the final
+        // boundary for a Cast/network worker that is inside an OS call.
         self.playback.shutdown();
         log::info!("shutdown_playback: finished");
     }
@@ -182,8 +185,11 @@ impl RockCastApp {
         Some(self.playback.stop())
     }
 
-    pub(in crate::app) fn poll_device_control_commands(&mut self) {
-        while let Some(command) = self.device_control.take_command() {
+    pub(in crate::app) fn poll_device_control_commands(&mut self) -> bool {
+        for _ in 0..MAX_REMOTE_COMMANDS_PER_FRAME {
+            let Some(command) = self.device_control.take_command() else {
+                break;
+            };
             let command_id = command.id;
             let plan = match plan_remote_command(
                 &command.command,
@@ -394,6 +400,7 @@ impl RockCastApp {
                 );
             }
         }
+        self.device_control.has_queued_commands()
     }
 
     fn discover_chromecasts(&mut self, command_id: &str) {
@@ -409,8 +416,8 @@ impl RockCastApp {
         self.pending_chromecast_discovery = Some(command_id.clone());
         let tx = self.ui_tx.clone();
         if self
-            .playback
-            .spawn_job(move |_| {
+            .background
+            .spawn(move |_| {
                 let result = LocalChromecastDiscovery.discover(Duration::from_secs(5));
                 let _ = tx.send(super::super::messages::UiMsg::RemoteChromecastDiscovery {
                     command_id,

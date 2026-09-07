@@ -328,10 +328,52 @@ fn duplicate_command_executes_once_and_sends_one_terminal_result() {
 }
 
 #[test]
+fn full_command_queue_rejects_without_growing() {
+    let device_id = "00000000-0000-4000-8000-000000000006";
+    let inner = ClientInner {
+        config: RuntimeConfig::for_test("http://127.0.0.1".into(), None),
+        auth: Arc::new(FakeAuth),
+        transport: Arc::new(FakeTransport),
+        state: Mutex::new(None),
+        authenticated_device_id: Mutex::new(Some(device_id.into())),
+        commands: Mutex::new(CommandBook::new()),
+        wake_ui: Arc::new(|| {}),
+        stopped: AtomicBool::new(false),
+        running: AtomicBool::new(false),
+        worker: Mutex::new(None),
+    };
+    let mut socket = FakeSocket {
+        inbound: VecDeque::new(),
+        sent: vec![],
+    };
+    for index in 0..=MAX_PENDING_COMMANDS {
+        let command_id = format!("00000000-0000-4000-8000-{index:012x}");
+        let frame = command_frame(&command_id, device_id, json!({"name":"playback.stop"}));
+        receive_command(&mut socket, &inner, &frame).unwrap();
+    }
+    assert_eq!(inner.commands.lock().queued.len(), MAX_PENDING_COMMANDS);
+    assert_eq!(
+        socket.sent.last().unwrap()["payload"]["error"]["code"],
+        "command_timeout"
+    );
+}
+
+#[test]
 fn reconnect_backoff_is_bounded_and_deterministic() {
     assert_eq!(backoff(0), Duration::from_secs(1));
     assert_eq!(backoff(5), Duration::from_secs(30));
     assert_eq!(backoff(99), Duration::from_secs(30));
+}
+
+#[test]
+fn state_snapshot_releases_mutex_before_publish() {
+    let state = Mutex::new(Some(PublishedState {
+        revision: 2,
+        observed_at: timestamp(),
+        state: PlayerState::idle(50),
+    }));
+    assert!(state_is_newer_than(&state, 1));
+    assert!(state.try_lock().is_some());
 }
 
 #[test]

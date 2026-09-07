@@ -15,6 +15,98 @@ use rockcast::{
     settings::{self, AppSettings},
 };
 
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE},
+    System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId},
+    UI::WindowsAndMessaging::{
+        BringWindowToTop, FindWindowW, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+        SW_RESTORE, SetForegroundWindow, ShowWindow,
+    },
+};
+
+#[cfg(windows)]
+struct SingleInstance(HANDLE);
+
+#[cfg(windows)]
+impl Drop for SingleInstance {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: this handle came from CreateMutexW and is owned by this guard.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+/// Claims the per-desktop-session RockCast instance. If another instance owns
+/// the mutex, restores its window and brings it forward before returning None.
+#[cfg(windows)]
+fn claim_single_instance() -> Option<SingleInstance> {
+    let mutex_name: Vec<u16> = "Local\\RockCast.SingleInstance.v1\0"
+        .encode_utf16()
+        .collect();
+
+    // SAFETY: both pointers are valid for this call and the name is NUL-terminated.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
+    if handle.is_null() {
+        // Do not make an OS resource failure prevent RockCast from starting.
+        return Some(SingleInstance(handle));
+    }
+
+    // GetLastError must be read immediately after CreateMutexW.
+    if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+        return Some(SingleInstance(handle));
+    }
+
+    // This process does not own the existing mutex handle for any useful work.
+    unsafe { CloseHandle(handle) };
+    activate_existing_window();
+    None
+}
+
+#[cfg(windows)]
+fn activate_existing_window() {
+    // The first process may own the mutex just before eframe creates its window.
+    for _ in 0..40 {
+        for title in rockcast::i18n::WINDOW_TITLES {
+            let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: title is NUL-terminated and lives for the duration of the call.
+            let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+            if hwnd.is_null() {
+                continue;
+            }
+
+            // SAFETY: hwnd identifies the existing RockCast top-level window. Temporarily
+            // sharing the foreground thread's input queue gives this user-initiated launcher
+            // a reliable activation context; the queues are detached before returning.
+            unsafe {
+                let foreground = GetForegroundWindow();
+                let current_thread = GetCurrentThreadId();
+                let foreground_thread = if foreground.is_null() {
+                    0
+                } else {
+                    GetWindowThreadProcessId(foreground, std::ptr::null_mut())
+                };
+                let attached = foreground_thread != 0
+                    && foreground_thread != current_thread
+                    && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
+                }
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+
+                if attached {
+                    AttachThreadInput(current_thread, foreground_thread, 0);
+                }
+            }
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Writes log lines to a file and (in debug) also to stderr.
 struct TeeLog {
     file: Arc<Mutex<File>>,
@@ -73,6 +165,11 @@ fn init_logging() -> std::path::PathBuf {
 }
 
 fn main() -> eframe::Result<()> {
+    #[cfg(windows)]
+    let Some(_single_instance) = claim_single_instance() else {
+        return Ok(());
+    };
+
     // rustls 0.23: crypto provider required
     let _ = rustls::crypto::ring::default_provider().install_default();
     let log_path = init_logging();

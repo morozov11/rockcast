@@ -26,7 +26,8 @@ use crate::{
     playback::PlaybackController,
     playback_diag,
     rockserver::RuntimeConfig,
-    settings::AppSettings,
+    runtime::BackgroundRuntime,
+    settings::{AppSettings, SettingsWriter},
     stations::Station,
     telemetry::{PlaybackSnapshot, Telemetry},
 };
@@ -94,6 +95,7 @@ pub(super) fn account_session_active(state: &AccountUiState) -> bool {
 
 pub struct RockCastApp {
     pub(super) playback: PlaybackController,
+    pub(super) background: BackgroundRuntime,
     pub(super) stations: Vec<Station>,
     /// Text sent to the global RockServer station search.
     pub(super) station_search: String,
@@ -143,6 +145,7 @@ pub struct RockCastApp {
     pub(super) ui_rx: mpsc::Receiver<UiMsg>,
     pub(super) ui_tx: mpsc::Sender<UiMsg>,
     pub(super) settings: AppSettings,
+    pub(super) settings_writer: SettingsWriter,
     pub(super) last_settings_save: Instant,
     pub(super) settings_dirty: bool,
     pub(super) shutting_down: bool,
@@ -208,6 +211,7 @@ impl RockCastApp {
 
         Self {
             playback: PlaybackController::new(),
+            background: BackgroundRuntime::new_named(4, "rockcast-io"),
             stations: Vec::new(),
             station_search: String::new(),
             selected_genre: None,
@@ -255,6 +259,7 @@ impl RockCastApp {
             ui_rx,
             ui_tx,
             settings,
+            settings_writer: SettingsWriter::new(),
             last_settings_save: Instant::now(),
             settings_dirty: false,
             shutting_down: false,
@@ -285,7 +290,7 @@ impl eframe::App for RockCastApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.bootstrap();
         self.poll_messages(ctx);
-        self.poll_device_control_commands();
+        let device_commands_pending = self.poll_device_control_commands();
         self.poll_pairing();
         self.apply_volume_if_needed();
         self.sync_device_control_state();
@@ -316,6 +321,7 @@ impl eframe::App for RockCastApp {
             || self.voice_busy
             || self.account_load_started
             || self.account_refreshing
+            || device_commands_pending
             || matches!(self.account_state, AccountUiState::Waiting { .. });
         let snap = PlaybackSnapshot {
             playing: self.playing,
@@ -533,8 +539,8 @@ impl RockCastApp {
         let tx = self.ui_tx.clone();
         let rockserver = self.rockserver.clone();
         if self
-            .playback
-            .spawn_job(move |_| {
+            .background
+            .spawn(move |_| {
                 let client = crate::session::AccountClient::new(
                     rockserver,
                     crate::session::OsCredentialStore,

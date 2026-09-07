@@ -195,8 +195,12 @@ impl RockCastApp {
         let lang = settings.language;
         let rockserver = RuntimeConfig::for_app();
         log::info!("RockServer configuration loaded");
-        let device_control =
-            DeviceControlClient::new(rockserver.clone(), settings.device_control_state_revision);
+        let repaint = cc.egui_ctx.clone();
+        let device_control = DeviceControlClient::new(
+            rockserver.clone(),
+            settings.device_control_state_revision,
+            Arc::new(move || repaint.request_repaint()),
+        );
         let last_played_station = settings.last_played_station.clone();
         let t = lang.t();
 

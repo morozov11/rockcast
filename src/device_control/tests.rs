@@ -4,7 +4,10 @@ use super::*;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    sync::{atomic::AtomicUsize, mpsc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
 };
 
 struct FakeSocket {
@@ -268,6 +271,7 @@ fn discovery_result_uses_the_canonical_receivers_output_shape() {
 fn duplicate_command_executes_once_and_sends_one_terminal_result() {
     let command_id = "00000000-0000-4000-8000-000000000005";
     let device_id = "00000000-0000-4000-8000-000000000006";
+    let wakes = Arc::new(AtomicUsize::new(0));
     let inner = ClientInner {
         config: RuntimeConfig::for_test("http://127.0.0.1".into(), None),
         auth: Arc::new(FakeAuth),
@@ -275,6 +279,12 @@ fn duplicate_command_executes_once_and_sends_one_terminal_result() {
         state: Mutex::new(None),
         authenticated_device_id: Mutex::new(Some(device_id.into())),
         commands: Mutex::new(CommandBook::new()),
+        wake_ui: {
+            let wakes = Arc::clone(&wakes);
+            Arc::new(move || {
+                wakes.fetch_add(1, Ordering::Relaxed);
+            })
+        },
         stopped: AtomicBool::new(false),
         running: AtomicBool::new(false),
         worker: Mutex::new(None),
@@ -286,6 +296,7 @@ fn duplicate_command_executes_once_and_sends_one_terminal_result() {
     };
     receive_command(&mut socket, &inner, &frame).unwrap();
     receive_command(&mut socket, &inner, &frame).unwrap();
+    assert_eq!(wakes.load(Ordering::Relaxed), 1);
     assert_eq!(
         socket
             .sent
@@ -337,6 +348,7 @@ fn hello_registration_and_fresh_snapshot_are_ordered() {
         state: Mutex::new(Some(state)),
         authenticated_device_id: Mutex::new(None),
         commands: Mutex::new(CommandBook::new()),
+        wake_ui: Arc::new(|| {}),
         stopped: AtomicBool::new(false),
         running: AtomicBool::new(false),
         worker: Mutex::new(None),
@@ -398,6 +410,7 @@ fn resync_always_publishes_another_full_snapshot() {
         state: Mutex::new(Some(state)),
         authenticated_device_id: Mutex::new(None),
         commands: Mutex::new(CommandBook::new()),
+        wake_ui: Arc::new(|| {}),
         stopped: AtomicBool::new(false),
         running: AtomicBool::new(false),
         worker: Mutex::new(None),
@@ -427,6 +440,7 @@ fn server_disconnect_is_recoverable_and_does_not_execute_playback() {
         state: Mutex::new(None),
         authenticated_device_id: Mutex::new(None),
         commands: Mutex::new(CommandBook::new()),
+        wake_ui: Arc::new(|| {}),
         stopped: AtomicBool::new(false),
         running: AtomicBool::new(false),
         worker: Mutex::new(None),

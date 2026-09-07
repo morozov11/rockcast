@@ -57,6 +57,7 @@ struct ClientInner {
     state: Mutex<Option<PublishedState>>,
     authenticated_device_id: Mutex<Option<String>>,
     commands: Mutex<CommandBook>,
+    wake_ui: Arc<dyn Fn() + Send + Sync>,
     stopped: AtomicBool,
     running: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -102,23 +103,39 @@ pub(crate) struct DeviceControlClient {
 }
 
 impl DeviceControlClient {
-    pub(crate) fn new(config: RuntimeConfig, initial_revision: u64) -> Self {
+    pub(crate) fn new(
+        config: RuntimeConfig,
+        initial_revision: u64,
+        wake_ui: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         let auth = Arc::new(AccountAuth {
             config: config.clone(),
         });
-        Self::with_parts(
+        Self::with_parts_and_wake(
             config,
             initial_revision,
             auth,
             Arc::new(TungsteniteTransport),
+            wake_ui,
         )
     }
 
+    #[cfg(test)]
     fn with_parts(
         config: RuntimeConfig,
         initial_revision: u64,
         auth: Arc<dyn DeviceControlAuth>,
         transport: Arc<dyn DeviceControlTransport>,
+    ) -> Self {
+        Self::with_parts_and_wake(config, initial_revision, auth, transport, Arc::new(|| {}))
+    }
+
+    fn with_parts_and_wake(
+        config: RuntimeConfig,
+        initial_revision: u64,
+        auth: Arc<dyn DeviceControlAuth>,
+        transport: Arc<dyn DeviceControlTransport>,
+        wake_ui: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         let client = Self {
             inner: Arc::new(ClientInner {
@@ -128,6 +145,7 @@ impl DeviceControlClient {
                 state: Mutex::new(None),
                 authenticated_device_id: Mutex::new(None),
                 commands: Mutex::new(CommandBook::new()),
+                wake_ui,
                 stopped: AtomicBool::new(false),
                 running: AtomicBool::new(false),
                 worker: Mutex::new(None),
@@ -357,6 +375,7 @@ fn receive_command(
     }
     commands.queued.push_back(command.clone());
     drop(commands);
+    (inner.wake_ui)();
     command_accepted(socket, &command.id)
 }
 

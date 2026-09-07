@@ -1,5 +1,16 @@
 # RockCast status
 
+## DC-016 — idle command wake-up and live E2E acceptance (2026-09-07)
+
+When RockCast was idle, its device-control worker could enqueue `device.command` while egui had
+no scheduled repaint, leaving the UI-owned executor asleep until the server deadline. Enqueueing
+now requests a thread-safe egui repaint; the worker still performs no playback work and terminal
+results remain authoritative UI outcomes. A physical paired RockMobile `Stop` traversed deployed
+RockServer and the refreshed RockCast, with staging recording `succeeded` in under one second.
+
+Checks: `cargo fmt --check` and `cargo test device_control --lib` (15 passed). This accepts
+playback-command E2E only; real Chromecast hardware smoke remains unperformed.
+
 ## DC-014 — Chromecast and relay adapters (local implementation, 2026-09-06)
 
 RockCast now advertises its real CastV2 actions (`discover`, `connect`, `disconnect`) with a

@@ -3,6 +3,7 @@ name = "rockcast"
 version = "0.1.0"
 edition = "2024"
 description = "RockCast — internet radio on Chromecast / Google Cast"
+license = "Apache-2.0"
 
 [dependencies]
 cpal = "0.15"

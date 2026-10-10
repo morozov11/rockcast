@@ -4,6 +4,16 @@ Desktop internet radio player for Windows and Linux. Play rock / metal streams o
 
 ![RockCast](window_shot.png)
 
+## Ecosystem
+
+RockCast is part of the RockCast internet radio suite:
+
+- **[RockCast](https://github.com/morozov11/rockcast)** *(this repository)* — Desktop internet radio player for Windows & Linux with Google Cast (CASTV2), local playback, and spectrum visualizer.
+- **[RockMobile](https://github.com/morozov11/rockmobile)** — Android companion app and radio player with background playback and remote device control.
+- **[RockServer](https://github.com/morozov11/rockserver)** — Rust backend for radio discovery, AI semantic search, streaming voice recognition, and device sync ([rockplatform.win](https://rockplatform.win)).
+- **[rock-esp32](https://github.com/morozov11/rock-esp32)** — Standalone hardware radio player and display firmware based on ESP32-P4.
+- **[RockCast Station Catalog](https://github.com/morozov11/rockcast-station-catalog)** — Curated baseline station catalog, JSON schema, and offline validation tools.
+
 ## Features
 
 - **Local playback** — decode and play HTTP(S) radio streams on your PC (cpal + symphonia)
@@ -110,7 +120,7 @@ Detailed Russian-language instructions, including voice commands: **[docs/user-m
 
 ## Control from RockMobile
 
-Pair this RockCast with the same RockServer account as RockMobile, then select the online desktop in the phone's Devices screen. Station selections on the phone reach RockCast through device-control commands. RockCast publishes confirmed playback state and an optional current track title from ICY metadata; the phone resolves the station name through RockServer. A station without stream metadata has no track title.
+Pair this RockCast with the same [RockServer](https://github.com/morozov11/rockserver) account as [RockMobile](https://github.com/morozov11/rockmobile), then select the online desktop in the phone's Devices screen. Station selections on the phone reach RockCast through device-control commands. RockCast publishes confirmed playback state and an optional current track title from ICY metadata; the phone resolves the station name through RockServer. A station without stream metadata has no track title.
 
 ## Station catalog
 
@@ -165,9 +175,9 @@ Typical fields: `volume`, `station_url`, `last_played_station`, `device_id`, `eq
 
 ## RockServer and voice control
 
-Official RockCast releases use the production RockServer at `https://rockplatform.win` automatically. Public station search calls `POST /api/v1/search` without an Authorization header. The window has no RockServer URL or token controls, and these values are not saved in ordinary user settings. RockCast publishes its embedded local catalog first; if the public API is unavailable, it continues with the same local catalog and playback remains independent of RockServer.
+Official RockCast releases use the production [RockServer](https://github.com/morozov11/rockserver) at [rockplatform.win](https://rockplatform.win) automatically. Public station search calls `POST /api/v1/search` without an Authorization header. The window has no RockServer URL or token controls, and these values are not saved in ordinary user settings. RockCast publishes its embedded local catalog first; if the public API is unavailable, it continues with the same local catalog and playback remains independent of RockServer.
 
-The **Voice** button records PCM16 mono from the default Windows microphone until release or the 60-second limit and connects to public `wss://rockplatform.win/api/v1/voice/stream` without Bearer authorization. HTTPS is always upgraded to WSS, preserving TLS. The official runtime uses the compatible buffered SpeechKit v1 request. Input-device selection/testing and cancellation after upload begins are not implemented yet.
+The **Voice** button records PCM16 mono from the default Windows microphone until release or the 60-second limit and connects to public `wss://rockplatform.win/api/v1/voice/stream` ([rockplatform.win](https://rockplatform.win)) without Bearer authorization. HTTPS is always upgraded to WSS, preserving TLS. The official runtime uses the compatible buffered SpeechKit v1 request. Input-device selection/testing and cancellation after upload begins are not implemented yet.
 
 For local development and tests, debug builds alone accept `ROCKCAST_DEV_ROCKSERVER_URL`. A Bearer-protected development server can additionally use `ROCKCAST_DEV_ROCKSERVER_BEARER_TOKEN`, and `ROCKCAST_DEV_ROCKSERVER_VOICE_MODE=streaming_v3` selects streaming capture. These runtime-only overrides are ignored by release builds, never written to settings, never shown in the UI, and their values are not logged.
 
@@ -272,7 +282,7 @@ Prints every Cast receiver found via mDNS and/or subnet scan (about 8 seconds).
 
 ## License
 
-RockCast is licensed under the [GNU General Public License, version 3 or later (GPL-3.0-or-later)](https://www.gnu.org/licenses/gpl-3.0.html).
+RockCast is licensed under the [Apache License, Version 2.0](LICENSE).
 
 ## Acknowledgments
 

@@ -38,9 +38,6 @@ pub struct AppSettings {
     /// Parallel stream analysis for the visualizer (extra traffic).
     #[serde(default)]
     pub eq_enabled: bool,
-    /// PC fetches the station (VPN) and relays audio to Cast over LAN.
-    #[serde(default)]
-    pub cast_relay: bool,
     #[serde(default)]
     pub language: crate::i18n::Lang,
     #[serde(default)]
@@ -260,16 +257,32 @@ mod tests {
         let path = dir.join("settings.json");
         let expected = AppSettings {
             volume: 73,
-            cast_relay: true,
             ..Default::default()
         };
         expected.save_to(&path).unwrap();
         let actual = AppSettings::load_from(&path).unwrap();
         assert_eq!(actual.volume, 73);
-        assert!(actual.cast_relay);
         fs::write(&path, b"{").unwrap();
         assert!(AppSettings::load_from(&path).is_err());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_relay_switch_is_ignored_and_not_saved() {
+        for enabled in [false, true] {
+            let settings: AppSettings = serde_json::from_value(serde_json::json!({
+                "volume": 61,
+                "cast_relay": enabled,
+            }))
+            .unwrap();
+            assert_eq!(settings.volume, 61);
+            assert!(
+                serde_json::to_value(settings)
+                    .unwrap()
+                    .get("cast_relay")
+                    .is_none()
+            );
+        }
     }
 
     #[test]

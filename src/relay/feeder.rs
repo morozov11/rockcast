@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     audio::{decode::run_live_decode_relay_pcm, format::parse_stream_title, spectrum::SpectrumTap},
-    net::{metadata_interval, stream_client, stream_headers},
+    net::{metadata_interval, stream_client, stream_headers_for_url},
 };
 
 use super::fanout::Fanout;
@@ -21,7 +21,7 @@ const READ_POLL: Duration = Duration::from_millis(200);
 const BUF: usize = 16 * 1024;
 
 pub fn run_feeder_passthrough(url: &str, fanout: &Fanout, stop: &AtomicBool) -> Result<(), String> {
-    let headers = stream_headers(false);
+    let headers = stream_headers_for_url(url, false)?;
     let client = stream_client(Duration::from_secs(10), None)?;
     let resp = open_upstream(client, url, headers, stop)?;
     if !resp.status().is_success() {

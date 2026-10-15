@@ -13,7 +13,7 @@ src/
     theme.rs           Colors, panel chrome, column widths
     messages.rs        UiMsg (background → UI), same_output_device()
     actions/           Play/stop/scan/settings/voice handlers
-      settings.rs      Persist prefs, language, EQ/relay toggles
+      settings.rs      Persist prefs, language, EQ settings
       playback.rs      play/stop/shutdown, observer wiring
       poll.rs          PlaybackEvent + UiMsg dispatch
       catalog.rs       Station/device refresh, bootstrap
@@ -48,7 +48,7 @@ src/
   station_icons.rs     server-resolved icon path or favicon fetch, decode, and cache
   settings.rs          app dir settings.json + log_path (LOCALAPPDATA or ~/.config/rockcast)
   i18n.rs              Lang::Ru | En string tables
-  relay/               StreamRelay — LAN HTTP proxy (PC→Cast, VPN-friendly)
+  relay/               StreamRelay — LAN HTTP proxy (RockServer→PC→Cast)
     error.rs           RelayError
     fanout.rs          Multi-client broadcast
     feeder.rs          Upstream fetch + transcode paths

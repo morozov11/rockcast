@@ -2,11 +2,12 @@
 
 use eframe::egui::{self, RichText, Ui, Vec2};
 use egui_taffy::{
+    TuiBuilderLogic,
     taffy::{
         self,
-        prelude::{auto, length, percent, AlignItems, FlexDirection, Size},
+        prelude::{AlignItems, FlexDirection, Size, auto, length, percent},
     },
-    tui, TuiBuilderLogic,
+    tui,
 };
 
 use super::super::RockCastApp;
@@ -15,16 +16,7 @@ use super::super::theme::*;
 impl RockCastApp {
     pub(in crate::app) fn draw_device_row(&mut self, ui: &mut Ui) {
         let t = self.lang.t();
-        let cast_selected = self
-            .selected_device
-            .and_then(|i| self.devices.get(i))
-            .is_some_and(|d| !d.is_local());
-
-        let labels: Vec<String> = self
-            .devices
-            .iter()
-            .map(|d| d.label(self.lang))
-            .collect();
+        let labels: Vec<String> = self.devices.iter().map(|d| d.label(self.lang)).collect();
 
         let selected_text = match self.selected_device.and_then(|i| labels.get(i)) {
             Some(s) => s.clone(),
@@ -40,11 +32,9 @@ impl RockCastApp {
 
         let selected_idx = self.selected_device;
         let loading_devices = self.loading_devices;
-        let cast_relay = self.cast_relay;
 
         let mut new_selection: Option<usize> = None;
         let mut refresh_clicked = false;
-        let mut new_cast_relay: Option<bool> = None;
 
         tui(ui, ui.id().with("device_row"))
             .reserve_available_width()
@@ -134,33 +124,6 @@ impl RockCastApp {
                         }
                     });
                 });
-
-                // Cast relay checkbox
-                if cast_selected {
-                    tui.style(taffy::Style {
-                        flex_shrink: 0.0,
-                        size: Size {
-                            width: auto(),
-                            height: length(28.0_f32),
-                        },
-                        ..Default::default()
-                    })
-                    .ui(|ui| {
-                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        ui.horizontal_centered(|ui| {
-                            let mut relay = cast_relay;
-                            let toggle = ui
-                                .checkbox(
-                                    &mut relay,
-                                    RichText::new(t.cast_relay).color(FG).size(12.5),
-                                )
-                                .on_hover_text(format!("{}\n{}", t.cast_relay_hint, t.cast_relay_note));
-                            if toggle.changed() {
-                                new_cast_relay = Some(relay);
-                            }
-                        });
-                    });
-                }
             });
 
         if let Some(i) = new_selection {
@@ -179,10 +142,6 @@ impl RockCastApp {
 
         if refresh_clicked {
             self.refresh_devices();
-        }
-
-        if let Some(relay) = new_cast_relay {
-            self.set_cast_relay(relay);
         }
     }
 }

@@ -94,7 +94,6 @@ impl PlaybackController {
         station: Station,
         device: OutputDevice,
         volume: u8,
-        use_relay: bool,
         spectrum_enabled: bool,
     ) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -142,10 +141,24 @@ impl PlaybackController {
             {
                 return;
             }
+            // Every output reads the authenticated RockServer relay; station.url stays an identity key.
+            local.stop();
+            relay.stop();
+            let upstream = match crate::rockserver::RuntimeConfig::for_app()
+                .station_stream_url(&station.id)
+            {
+                Ok(url) => url,
+                Err(message) => {
+                    let _ = tx.send(PlaybackEvent::Error { message, generation });
+                    return;
+                }
+            };
+            if let Err(message) = crate::net::stream_headers_for_url(&upstream, false) {
+                let _ = tx.send(PlaybackEvent::Error { message, generation });
+                return;
+            }
             match device {
             OutputDevice::Cast(cast_dev) => {
-                local.stop();
-                relay.stop();
                 if runtime_cancel.is_cancelled()
                     || operation_cancel.load(Ordering::Acquire)
                     || play_generation.load(Ordering::Acquire) != generation
@@ -153,18 +166,13 @@ impl PlaybackController {
                     return;
                 }
 
-                let mut relay_owned = false;
-                let (load_url, load_ct) = if use_relay {
-                    match relay.start(
-                        &station.url,
+                let (load_url, load_ct) = match relay.start(
+                        &upstream,
                         &cast_dev.discovered.host,
                         station.content_type(),
                         &operation_cancel,
                     ) {
-                        Ok(value) => {
-                            relay_owned = true;
-                            value
-                        }
+                        Ok(value) => value,
                         Err(e) => {
                             let _ = tx.send(PlaybackEvent::Error {
                                 message: e.to_string(),
@@ -172,12 +180,9 @@ impl PlaybackController {
                             });
                             return;
                         }
-                    }
-                } else {
-                    (station.url.clone(), station.content_type().to_string())
-                };
+                    };
 
-                if use_relay {
+                {
                     let min_pcm = 48_000usize * 2 * 2;
                     let min_bytes = if load_ct.contains("wav") {
                         min_pcm
@@ -211,9 +216,7 @@ impl PlaybackController {
                     || operation_cancel.load(Ordering::Acquire)
                     || play_generation.load(Ordering::Acquire) != generation
                 {
-                    if relay_owned {
-                        relay.stop();
-                    }
+                    relay.stop();
                     return;
                 }
                 let result = cast.play(
@@ -237,11 +240,7 @@ impl PlaybackController {
                 match result {
                     Ok(()) => {
                         let _ = cast.set_volume_current(local_volume(volume));
-                        let tap_url = if relay_owned {
-                            relay.tap_url()
-                        } else {
-                            Some(station.url.clone())
-                        };
+                        let tap_url = relay.tap_url();
                         let _ = tx.send(PlaybackEvent::PlayOk {
                             url: station.url,
                             tap_url,
@@ -250,9 +249,7 @@ impl PlaybackController {
                         });
                     }
                     Err(e) => {
-                        if relay_owned {
-                            relay.stop();
-                        }
+                        relay.stop();
                         let _ = tx.send(PlaybackEvent::Error {
                             message: e.to_string(),
                             generation,
@@ -261,7 +258,6 @@ impl PlaybackController {
                 }
             }
             OutputDevice::Local(local_dev) => {
-                relay.stop();
                 let _ = cast.stop();
                 if runtime_cancel.is_cancelled()
                     || operation_cancel.load(Ordering::Acquire)
@@ -271,7 +267,7 @@ impl PlaybackController {
                 }
                 let result = local.play(
                     &local_dev,
-                    &station.url,
+                    &upstream,
                     local_volume(volume),
                     spectrum_enabled,
                     Arc::clone(&operation_cancel),
@@ -288,7 +284,7 @@ impl PlaybackController {
                         if play_generation.load(Ordering::Acquire) == generation {
                             let _ = tx.send(PlaybackEvent::PlayOk {
                                 url: station.url.clone(),
-                                tap_url: Some(station.url.clone()),
+                                tap_url: Some(upstream.clone()),
                                 generation,
                                 local: true,
                             });

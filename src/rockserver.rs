@@ -53,6 +53,50 @@ impl RuntimeConfig {
         &self.base_url
     }
 
+    pub(crate) fn station_stream_url(&self, station_id: &str) -> Result<String, String> {
+        if station_id.is_empty()
+            || station_id.len() > 128
+            || matches!(station_id, "." | "..")
+            || station_id.chars().any(char::is_control)
+        {
+            return Err("Invalid station ID".into());
+        }
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/api/v1/stations/",
+            self.base_url.trim().trim_end_matches('/')
+        ))
+        .map_err(|_| "Invalid RockServer URL")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("Invalid RockServer URL".into());
+        }
+        url.path_segments_mut()
+            .map_err(|_| "Invalid RockServer URL")?
+            .pop_if_empty()
+            .push(station_id)
+            .push("stream");
+        Ok(url.into())
+    }
+
+    pub(crate) fn is_station_stream_url(&self, url: &str) -> bool {
+        let Ok(prefix) = self.station_stream_url("station") else {
+            return false;
+        };
+        let prefix = prefix.strip_suffix("station/stream").unwrap();
+        let Some(id) = url
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix("/stream"))
+        else {
+            return false;
+        };
+        !id.is_empty() && !id.contains(['/', '?', '#'])
+    }
+
     pub(crate) fn bearer_token(&self) -> Option<&str> {
         self.bearer_token.as_deref()
     }
@@ -148,10 +192,7 @@ pub(crate) fn search(
 }
 
 /// Queries RockServer for a single station by its stable ID (`GET /api/v1/catalog/stations/{station_id}`).
-pub(crate) fn get_station(
-    config: &RuntimeConfig,
-    station_id: &str,
-) -> Result<Station, String> {
+pub(crate) fn get_station(config: &RuntimeConfig, station_id: &str) -> Result<Station, String> {
     let station_id = station_id.trim();
     if station_id.is_empty() {
         return Err("Station ID cannot be empty".into());
@@ -325,6 +366,30 @@ mod tests {
         thread,
     };
 
+    #[test]
+    fn relay_url_encodes_station_id_and_limits_credentials_to_its_endpoint() {
+        let config = RuntimeConfig::for_test("https://server.test/".into(), None);
+        let url = config.station_stream_url("radio/рок ?#").unwrap();
+        assert_eq!(
+            url,
+            "https://server.test/api/v1/stations/radio%2F%D1%80%D0%BE%D0%BA%20%3F%23/stream"
+        );
+        assert!(config.is_station_stream_url(&url));
+        for url in [
+            "https://server.test.evil/api/v1/stations/id/stream",
+            "http://server.test/api/v1/stations/id/stream",
+            "https://server.test/api/v1/stations/id/stream?token=x",
+            "https://server.test/api/v1/stations/a/b/stream",
+            "https://server.test/api/v1/stations//stream",
+            "https://upstream.test/live.mp3",
+        ] {
+            assert!(!config.is_station_stream_url(url), "{url}");
+        }
+        for id in ["", ".", "..", "a\nb", &"я".repeat(65)] {
+            assert!(config.station_stream_url(id).is_err());
+        }
+    }
+
     fn serve_one(response_body: &'static str) -> (String, thread::JoinHandle<String>) {
         serve_status("200 OK", response_body)
     }
@@ -364,7 +429,12 @@ mod tests {
     fn public_search_uses_v1_without_authorization() {
         let (base_url, server) = serve_one(r#"{"stations":[],"total":0,"has_more":false}"#);
         let config = RuntimeConfig::for_test(base_url, None);
-        assert!(search(&config, "rock", "en", 20, 0).unwrap().stations.is_empty());
+        assert!(
+            search(&config, "rock", "en", 20, 0)
+                .unwrap()
+                .stations
+                .is_empty()
+        );
         let request = server.join().unwrap().to_ascii_lowercase();
         assert!(request.starts_with("post /api/v1/search http/1.1\r\n"));
         assert!(!request.contains("authorization:"));
@@ -409,7 +479,12 @@ mod tests {
     fn developer_override_can_add_bearer_without_changing_route() {
         let (base_url, server) = serve_one(r#"{"stations":[]}"#);
         let config = RuntimeConfig::for_test(base_url, Some("dev-test-token"));
-        assert!(search(&config, "", "ru", 20, 0).unwrap().stations.is_empty());
+        assert!(
+            search(&config, "", "ru", 20, 0)
+                .unwrap()
+                .stations
+                .is_empty()
+        );
         let request = server.join().unwrap().to_ascii_lowercase();
         assert!(request.starts_with("post /api/v1/search http/1.1\r\n"));
         assert!(request.contains("authorization: bearer dev-test-token\r\n"));
@@ -435,7 +510,11 @@ mod tests {
         assert_eq!(batch.stations[0].id, "st-1");
         assert_eq!(batch.next_cursor.as_deref(), Some("cursor-next"));
         let request = server.join().unwrap().to_ascii_lowercase();
-        assert!(request.starts_with("get /api/v1/catalog/stations?limit=10&cursor=cursor-prev http/1.1\r\n"));
+        assert!(
+            request.starts_with(
+                "get /api/v1/catalog/stations?limit=10&cursor=cursor-prev http/1.1\r\n"
+            )
+        );
     }
 
     #[test]

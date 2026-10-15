@@ -1,5 +1,13 @@
 # RockCast status
 
+## Mandatory RockServer audio proxy and PC Cast relay (2026-10-16)
+
+- Both local output and Cast use the authenticated `/api/v1/stations/{id}/stream` RockServer route. Cast always receives a PC LAN relay URL; direct upstream LOAD and its checkbox/configuration are removed.
+- Existing native credentials are renewed when needed and resolved again for feeder reconnects. Legacy `cast_relay` values do not affect playback and are no longer saved. Remote commands cannot switch to direct Cast.
+- Checks: `cargo test --lib` (202 passed), `cargo test --test relay_via_pc_opus` (2 passed), `cargo build --release` succeeded.
+- Live acceptance: release UI has no relay switch. Radio Paradise Rock Mix (AAC) streamed through RockServer to the PC and then to the receiver named «Главная спальня». Logs confirmed the proxy URL, AAC decode, a receiver connection to the PC LAN URL, and Cast `PLAYING`; ICY title and spectrum updated.
+- Remaining live limitation: switching next to 181.FM Hair Band opened the RockServer MP3 stream and produced PCM, but the subsequent Cast TCP connection timed out (`os error 10060`). MP3 playback on the receiver and repeated station switching are not claimed as verified; the current error handler also removed that station from the visible list. This receiver/session issue remains separate follow-up work.
+
 ## Voice search pagination, table geometry fit, and scroll controls (2026-09-30)
 
 - **Voice search pagination & infinite scroll**: `handle_voice_result` now automatically initiates a catalog

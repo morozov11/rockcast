@@ -69,15 +69,17 @@ User Play / double-click station
       bump play_generation → G
       cancel previous token; create token(G); spawn playback worker(G)
          acquire transition lock; re-check token(G)
+         stop previous local/relay engines
+         resolve RockServer proxy URL by station ID and current native token
          if device Cast:
-            local.stop()
-            cast.play(...)          # may wait ≤15s for LOAD; cancellable
+            relay.start(proxy_url); wait for initial audio
+            cast.play(relay_lan_url, ...)          # may wait ≤15s for LOAD; cancellable
          if device Local:
             cast.stop()             # clears an established Cast session
-            local.play(...)         # probe ≤12s, then cpal
+            local.play(proxy_url, ...)         # probe ≤12s, then cpal
          if generation still G:
             UiMsg::PlayOk | Error
-  → UI: PlayOk sets playing=true; may schedule Cast stream tap
+  → UI: PlayOk sets playing=true; Cast reuses relay title/spectrum data
 ```
 
 ## Control flow: Stop / exit
@@ -106,9 +108,9 @@ Exit → cancel token + non-blocking local/relay shutdown → process::exit(0)
 | Mode | Titles | Spectrum |
 |------|--------|----------|
 | Local | ICY inside `LocalPlayer` decode (`title_tx`) | FFT in decode thread → `LocalPlayer::levels` |
-| Cast | `observers::IcyWatcher` HTTP tap after PlayOk | `observers::SpectrumAnalyzer` separate HTTP tap |
+| Cast via PC (always) | Shared relay feeder ICY title | FFT from the relay decode path |
 
-Both taps are stopped on station change / stop / error. The app forwards observed ICY/relay titles into its optional device-control `track_title` runtime field and publishes the changed state. Station ID remains the playback identity; a title is never inferred from the station name.
+The shared relay is stopped on station change / stop / error. No extra download of the original station is opened. The app forwards observed ICY/relay titles into its optional device-control `track_title` runtime field and publishes the changed state. Station ID remains the playback identity; a title is never inferred from the station name.
 
 ## Station icon flow (MVP)
 

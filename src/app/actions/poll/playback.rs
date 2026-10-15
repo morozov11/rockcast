@@ -122,8 +122,7 @@ impl RockCastApp {
                         next.url,
                         self.voice_fallback.len()
                     );
-                    self.status =
-                        format!("Станция недоступна; пробую следующую: {}", next.name);
+                    self.status = format!("Станция недоступна; пробую следующую: {}", next.name);
                     self.stations.retain(|station| station.url != next.url);
                     self.stations.insert(0, next);
                     self.selected_station = Some(0);
@@ -173,13 +172,7 @@ impl RockCastApp {
             .as_ref()
             .filter(|pending| pending.generation == generation)
             .and_then(|pending| pending.output.clone());
-        self.output = pending.unwrap_or_else(|| {
-            if self.playback.relay_active() {
-                crate::app::RemoteOutput::Relay(None)
-            } else {
-                crate::app::RemoteOutput::Chromecast(None)
-            }
-        });
+        self.output = pending.unwrap_or(crate::app::RemoteOutput::Relay(None));
     }
 
     pub(super) fn finish_stale_remote_command(&mut self) {

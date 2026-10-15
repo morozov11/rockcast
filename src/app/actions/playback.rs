@@ -203,13 +203,10 @@ impl RockCastApp {
         self.track_metadata = None;
         self.mark_settings_dirty();
         self.persist_settings_if_needed(true);
-        Some(self.playback.play(
-            station,
-            device,
-            self.volume,
-            self.cast_relay && !local,
-            self.eq_enabled,
-        ))
+        Some(
+            self.playback
+                .play(station, device, self.volume, self.eq_enabled),
+        )
     }
 
     pub(in crate::app) fn stop(&mut self) -> Option<u64> {
@@ -263,8 +260,8 @@ impl RockCastApp {
                     stream_uri,
                 } => {
                     // The server already validated this catalog station and resolved
-                    // its stream (RS-3), so play it directly. A local id match only
-                    // reuses metadata; the delivered URI stays authoritative.
+                    // its stream (RS-3). A local id match reuses metadata; actual
+                    // playback always opens the RockServer proxy by station ID.
                     let index = self.stations.iter().position(|s| s.id == station_id);
                     let index = match index {
                         Some(index) => {
@@ -344,12 +341,11 @@ impl RockCastApp {
                         continue;
                     }
                     self.select_cast_device(device);
-                    self.cast_relay = false;
                     let generation = self.play();
                     self.track_remote_transition(
                         &command_id,
                         generation,
-                        super::super::RemoteOutput::Chromecast(Some(receiver_id)),
+                        super::super::RemoteOutput::Relay(Some(receiver_id)),
                     );
                     continue;
                 }
@@ -381,7 +377,6 @@ impl RockCastApp {
                         continue;
                     }
                     self.selected_device = Some(local_index);
-                    self.cast_relay = false;
                     let generation = self.play();
                     self.track_remote_transition(
                         &command_id,
@@ -391,82 +386,25 @@ impl RockCastApp {
                     continue;
                 }
                 RemoteCommandPlan::RelayStart => {
-                    if matches!(&self.output, super::super::RemoteOutput::Relay(_))
-                        && self.playback.relay_active()
-                    {
+                    let result = if self.playback.relay_active() {
+                        CommandResult::succeeded()
+                    } else {
+                        CommandResult::failed(
+                            "invalid_payload",
+                            "Relay requires active Chromecast playback",
+                        )
+                    };
+                    self.device_control.complete_command(&command_id, result);
+                    continue;
+                }
+                RemoteCommandPlan::RelayStop => {
+                    if !self.playback.relay_active() {
                         self.device_control
                             .complete_command(&command_id, CommandResult::succeeded());
                         continue;
                     }
-                    let receiver_id = match &self.output {
-                        super::super::RemoteOutput::Chromecast(receiver_id) => receiver_id.clone(),
-                        _ => {
-                            self.device_control.complete_command(
-                                &command_id,
-                                CommandResult::failed(
-                                    "invalid_payload",
-                                    "Relay requires confirmed Chromecast playback",
-                                ),
-                            );
-                            continue;
-                        }
-                    };
-                    if !self.playing
-                        || self.selected_station.is_none()
-                        || self
-                            .selected_device
-                            .and_then(|index| self.devices.get(index))
-                            .is_none_or(|device| device.is_local())
-                    {
-                        self.device_control.complete_command(
-                            &command_id,
-                            CommandResult::failed(
-                                "invalid_payload",
-                                "Relay requires active Chromecast playback",
-                            ),
-                        );
-                        continue;
-                    }
-                    self.cast_relay = true;
-                    let generation = self.play();
-                    self.track_remote_transition(
-                        &command_id,
-                        generation,
-                        super::super::RemoteOutput::Relay(receiver_id),
-                    );
-                    continue;
-                }
-                RemoteCommandPlan::RelayStop => {
-                    let receiver_id = match &self.output {
-                        super::super::RemoteOutput::Relay(receiver_id) => receiver_id.clone(),
-                        super::super::RemoteOutput::Chromecast(_) => {
-                            self.device_control
-                                .complete_command(&command_id, CommandResult::succeeded());
-                            continue;
-                        }
-                        _ => {
-                            self.device_control.complete_command(
-                                &command_id,
-                                CommandResult::failed("invalid_payload", "Relay is not active"),
-                            );
-                            continue;
-                        }
-                    };
-                    if !self.playing || self.selected_station.is_none() {
-                        self.device_control.complete_command(
-                            &command_id,
-                            CommandResult::failed("invalid_payload", "Relay output is unavailable"),
-                        );
-                        continue;
-                    }
-                    self.cast_relay = false;
-                    let generation = self.play();
-                    self.track_remote_transition(
-                        &command_id,
-                        generation,
-                        super::super::RemoteOutput::Chromecast(receiver_id),
-                    );
-                    continue;
+                    // Stopping the mandatory relay stops Cast playback; it never enables direct Cast.
+                    self.stop()
                 }
             };
             if let Some(generation) = generation {
@@ -769,6 +707,37 @@ mod tests {
             playback.apply(plan);
         }
         assert_eq!(playback.calls.len(), 8);
+    }
+
+    #[test]
+    fn relay_commands_keep_the_mandatory_pc_route() {
+        let stations = [station("first", "https://upstream.test/live.mp3")];
+        for command in [
+            PlayerCommand::RelayStart,
+            PlayerCommand::RelaySetMode {
+                mode: "via_pc".into(),
+            },
+        ] {
+            assert_eq!(
+                plan_remote_command(&command, &stations, Some(0), 50).unwrap(),
+                RemoteCommandPlan::RelayStart
+            );
+        }
+        assert_eq!(
+            plan_remote_command(&PlayerCommand::RelayStop, &stations, Some(0), 50).unwrap(),
+            RemoteCommandPlan::RelayStop
+        );
+        assert!(
+            plan_remote_command(
+                &PlayerCommand::RelaySetMode {
+                    mode: "direct".into()
+                },
+                &stations,
+                Some(0),
+                50
+            )
+            .is_err()
+        );
     }
 
     #[test]

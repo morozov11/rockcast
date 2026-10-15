@@ -39,7 +39,6 @@ impl RockCastApp {
     pub(in crate::app) fn mark_settings_dirty(&mut self) {
         self.settings.volume = self.volume;
         self.settings.eq_enabled = self.eq_enabled;
-        self.settings.cast_relay = self.cast_relay;
         self.settings.language = self.lang;
         self.settings.station_name_col_w = self.station_name_col_w;
         self.settings.station_meta_col_w = self.station_meta_col_w;
@@ -89,27 +88,6 @@ impl RockCastApp {
         self.sync_spectrum();
     }
 
-    pub(in crate::app) fn set_cast_relay(&mut self, enabled: bool) {
-        if self.cast_relay == enabled {
-            return;
-        }
-        self.cast_relay = enabled;
-        log::info!("cast_relay -> {enabled}");
-        self.mark_settings_dirty();
-        self.persist_settings_if_needed(true);
-
-        let cast_active = (self.playing || self.playing_op) && !self.playing_local;
-        if cast_active {
-            log::info!("cast_relay changed during Cast playback — restarting with relay={enabled}");
-            self.status = if enabled {
-                self.lang.t().cast_relay_restart_on.into()
-            } else {
-                self.lang.t().cast_relay_restart_off.into()
-            };
-            self.play();
-        }
-    }
-
     pub(in crate::app) fn set_language(&mut self, ctx: &egui::Context, lang: Lang) {
         self.lang = lang;
         self.mark_settings_dirty();
@@ -127,7 +105,8 @@ impl RockCastApp {
         }
         // Refresh the catalog source label on language switch.
         let n = self.stations.len();
-        if n > 0 && (self.source.contains("локаль") || self.source.contains("local catalog")) {
+        if n > 0 && (self.source.contains("локаль") || self.source.contains("local catalog"))
+        {
             self.source = i18n::fmt1(lang.t().local_catalog, n);
         }
     }
@@ -229,4 +208,3 @@ mod tests {
         assert_eq!(result, None);
     }
 }
-

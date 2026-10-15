@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     audio::format::read_format_peek,
-    net::{metadata_interval, stream_client, stream_headers},
+    net::{metadata_interval, stream_client, stream_headers_for_url},
 };
 
 use super::super::icy::{IcyStreamReader, StopAwareBody, open_stream_response};
@@ -21,7 +21,7 @@ pub(super) fn open_icy_reader(
     title_tx: Option<mpsc::Sender<String>>,
     interruptible_body: bool,
 ) -> Result<OpenedIcyReader, String> {
-    let headers = stream_headers(false);
+    let headers = stream_headers_for_url(url, false)?;
     let client = stream_client(Duration::from_secs(10), None)?;
     let resp = open_stream_response(client, url, headers, stop)?;
     if !resp.status().is_success() {

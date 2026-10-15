@@ -25,6 +25,12 @@ Workers capture `generation` and a fresh `Arc<AtomicBool>` cancellation token. A
 or shutdown permanently cancels that token. Before applying side effects or sending
 `PlayOk`/`Error`, workers compare the generation and token after acquiring the transition lock.
 
+## Audio source and native session
+
+`PlaybackController` builds `/api/v1/stations/{id}/stream` from the stable station ID for every output, including voice results and server-delivered station commands. `station.url` is retained for existing history/selection matching, not for opening the original upstream.
+
+`net::stream_headers_for_url` gets a current access token from `AccountClient::device_control_access_token(false)` for each connection. Near-expiry tokens are renewed through the existing native device session; feeder reconnects resolve credentials again. Authorization is added only to the configured server's station relay and is marked sensitive. Tokens stay out of URLs, Cast LOAD and logs. Missing credentials fail with a sign-in message; there is no direct fallback. Offline catalog browsing remains available.
+
 ## Local path (`LocalPlayer`)
 
 ### API
@@ -36,7 +42,8 @@ or shutdown permanently cancels that token. Before applying side effects or send
 ### Pipeline
 
 ```text
-HTTP GET (Icy-MetaData: 1)
+RockServer GET /api/v1/stations/{id}/stream
+  (Authorization: Bearer <native access token>, Icy-MetaData: 1)
   → open_stream_response (side thread + OPEN_TIMEOUT)
   → StopAwareBody (chunk reader, polls stop every READ_POLL)
   → IcyStripReader (strip icy-metaint, parse StreamTitle → title_tx)
@@ -76,7 +83,7 @@ Internally:
 2. The worker acquires the playback transition lock and rechecks generation/token.
 3. `CastService::play` acquires its device `op_lock` and rechecks the caller-owned token.
 4. Reuse or open `CastChannel` (`take_or_connect`).
-5. CONNECT → ensure Default Media Receiver → LOAD (try station content-type then `audio/mpeg`).
+5. CONNECT → ensure Default Media Receiver → LOAD the PC LAN relay URL with its relay content type (for example `audio/wav`).
 6. Start heartbeat; store `LiveSession` in `current`.
 
 `receive_find` uses a **wall-clock** overall timeout (LOAD ~15s) and checks the operation token
@@ -84,19 +91,18 @@ every ~500ms read. Tokens are never reset, so an old LOAD cannot become active a
 
 ### After PlayOk (UI)
 
-- Direct Cast: schedule delayed `IcyWatcher` + optional `SpectrumAnalyzer` tap on the original station URL
-- Via-PC Cast: titles and spectrum use the already-running relay/tap rather than downloading the station twice
+- Cast: titles and spectrum use the already-running relay/decoded PCM rather than downloading the station twice
 - Local: titles/levels already from `LocalPlayer` — no extra tap
 
 ## Cast relay (Via PC)
 
-If `cast_relay` is on and the device is Cast:
+Every Cast output uses the PC relay; no UI or persisted switch can disable it:
 
-1. `StreamRelay::start(station_url, cast_host, …)` → `http://<lan-ip>:<port>/stream`
+1. `StreamRelay::start(rockserver_proxy_url, cast_host, …)` → `http://<lan-ip>:<port>/stream`
 2. `CastService::play` LOADs that LAN URL
 3. Stop / supersede / error calls `relay.stop()`
 
-Direct Cast (relay off) LOADs `station.url` as before.
+The worker waits for relay format/audio before LOAD and stops the relay on cancellation/error. Legacy `cast_relay` settings are ignored and no longer saved. `chromecast.connect` publishes output mode `relay`; `relay.start` / `relay.set_mode(via_pc)` are idempotent for an active relay, and `relay.stop` stops playback rather than switching to a direct station URL.
 
 ## Stop and error handling
 

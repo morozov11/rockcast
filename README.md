@@ -18,7 +18,7 @@ RockCast is part of the RockCast internet radio suite:
 
 - **Local playback** — decode and play HTTP(S) radio streams on your PC (cpal + symphonia)
 - **Google Cast** — discover receivers and stream live radio via CASTV2 (TLS + protobuf)
-- **Via PC relay** — optional: PC fetches the station (e.g. through VPN) and serves it to the speaker on LAN
+- **Via PC relay** — always enabled for Cast: PC receives the authenticated RockServer proxy stream and serves it to the speaker on LAN
 - **VPN-friendly discovery** — mDNS plus a LAN `/24` TCP scan with Cast `eureka_info` (works when Amnezia / WireGuard breaks multicast)
 - **Station catalog** — pinned schema-v1 JSON snapshot, instant offline startup, and server-backed search via RockServer
 - **Station icons (MVP)** — direct, bounded favicon/logo loading from station metadata with a local cache; RockServer-hosted icons are planned
@@ -27,7 +27,7 @@ RockCast is part of the RockCast internet radio suite:
 - **Spectrum visualizer** — optional FFT bars (uses the same local decode path or a stream tap for Cast)
 - **Bilingual UI** — Russian and English
 - **Persistent settings** — volume, last station, device, language, spectrum toggle
-- **RockServer-assisted search and voice** — official releases use the public production service automatically, while local catalog/playback remain available offline
+- **RockServer-assisted search and voice** — official releases use the public production service automatically, while local catalog browsing remains available offline; audio requires an account session and RockServer connectivity
 
 ## Requirements
 
@@ -96,7 +96,7 @@ Detailed Russian-language instructions, including voice commands: **[docs/user-m
 1. **Wait for stations** — the local catalog loads immediately on startup; search and voice find more stations via RockServer.
 2. **Find devices** — click **Find** to scan PC audio outputs and Cast receivers on the LAN.
 3. **Select output** — choose **This PC** (speakers) or a Cast device (e.g. a JBL speaker).
-4. **Via PC** (Cast only) — enable if the station needs VPN on the PC; RockCast relays audio to the speaker over Wi‑Fi.
+4. Cast always uses RockServer → PC → speaker over Wi-Fi. Local playback also reads the RockServer proxy. Sign in to your Rock account before starting radio.
 5. **Select a station** — click a row; the round ▶ button on the row (or a double-click) starts playback immediately. The playing row is highlighted with an accent bar and an animated equalizer next to the name.
 6. **Play / Stop** — the large accent button in the player deck starts the selected station and stops the live stream; every row has its own play/pause control too.
 7. **Volume** — thin slider in the deck footer (speaker icon = mute/unmute); Cast volume is scaled so the UI “100%” maps to a comfortable speaker level.
@@ -110,7 +110,7 @@ Detailed Russian-language instructions, including voice commands: **[docs/user-m
 - Discovery runs **mDNS** (`_googlecast._tcp`) on the real LAN NIC and, in parallel, a **unicast scan** of `x.x.x.1–254` for TCP **8009**, then reads `http://<ip>:8008/setup/eureka_info`.
 - Split-tunnel VPN exclusions often fix unicast but **not** multicast; the subnet scan is what finds devices like JBL when mDNS returns nothing.
 - Playback on Cast uses CASTV2: connect → launch Default Media Receiver → `LOAD` the live stream URL.
-- With **Via PC**, `LOAD` points at `http://<PC-LAN-IP>:<port>/stream` while the PC downloads the station (through VPN if needed). Allow inbound LAN (Windows Firewall / firewalld) if prompted.
+- `LOAD` always points at `http://<PC-LAN-IP>:<port>/stream`; the PC reads `/api/v1/stations/{id}/stream` from RockServer with its native-session bearer token. Allow inbound LAN (Windows Firewall / firewalld) if prompted.
 
 ### Local playback notes
 
@@ -171,11 +171,11 @@ Windows: %LOCALAPPDATA%\RockCast\settings.json
 Linux:   ~/.config/rockcast/settings.json
 ```
 
-Typical fields: `volume`, `station_url`, `last_played_station`, `device_id`, `eq_enabled`, `cast_relay`, and `language`. RockServer endpoint and credentials are not user settings.
+Typical fields: `volume`, `station_url`, `last_played_station`, `device_id`, `eq_enabled`, and `language`. RockServer endpoint and credentials are not user settings. The former `cast_relay` field is ignored when loading old settings and is omitted from new saves; direct Cast mode is removed.
 
 ## RockServer and voice control
 
-Official RockCast releases use the production [RockServer](https://github.com/morozov11/rockserver) at [rockplatform.win](https://rockplatform.win) automatically. Public station search calls `POST /api/v1/search` without an Authorization header. The window has no RockServer URL or token controls, and these values are not saved in ordinary user settings. RockCast publishes its embedded local catalog first; if the public API is unavailable, it continues with the same local catalog and playback remains independent of RockServer.
+Official RockCast releases use the production [RockServer](https://github.com/morozov11/rockserver) at [rockplatform.win](https://rockplatform.win) automatically. Public station search calls `POST /api/v1/search` without an Authorization header. The window has no RockServer URL or token controls, and these values are not saved in ordinary user settings. RockCast publishes its embedded local catalog first; if the public API is unavailable, the local catalog remains available for browsing. Both local and Cast audio require an authenticated RockServer stream; there is no direct-upstream fallback.
 
 The **Voice** button records PCM16 mono from the default Windows microphone until release or the 60-second limit and connects to public `wss://rockplatform.win/api/v1/voice/stream` ([rockplatform.win](https://rockplatform.win)) without Bearer authorization. HTTPS is always upgraded to WSS, preserving TLS. The official runtime uses the compatible buffered SpeechKit v1 request. Input-device selection/testing and cancellation after upload begins are not implemented yet.
 
@@ -265,7 +265,7 @@ Prints every Cast receiver found via mDNS and/or subnet scan (about 8 seconds).
 | UI thread (egui) | Renders UI; starts background work for scan / play / stop |
 | `LocalPlayer` | HTTP stream → decode → ring buffer → cpal output + optional FFT |
 | `CastService` | CASTV2 session, heartbeat, volume, `LOAD` / `STOP` |
-| `StreamRelay` | Optional LAN HTTP proxy: PC fetches station, Cast LOADs local URL |
+| `StreamRelay` | Mandatory Cast relay: authenticated RockServer stream -> PC -> Cast LAN URL |
 | Discovery | LAN NIC whitelist (skip Amnezia/Hyper-V/…) + mDNS + `/24` TCP probe |
 
 ## Troubleshooting
@@ -274,7 +274,7 @@ Prints every Cast receiver found via mDNS and/or subnet scan (about 8 seconds).
 |---------|-------------|
 | No Cast devices | Click **Find** again; ensure PC and speaker are on the same LAN; allow LAN in VPN; run `cargo run --example cast_probe` |
 | Cast found, play fails | Confirm the station URL plays on PC first; check firewall for outbound HTTPS to the stream and TCP 8009 to the device |
-| Station needs VPN, silent on JBL | Enable **Via PC**; allow inbound LAN (Windows Firewall / firewalld); PC and JBL on same Wi‑Fi |
+| Silent on JBL | Check RockServer sign-in and availability; allow inbound LAN (Windows Firewall / firewalld); PC and JBL on same Wi‑Fi |
 | Empty station list | Check `stations.v1.json` path or `ROCKCAST_STATIONS` environment variable |
 | No track title | Many stations do not send ICY metadata |
 | Wrong PC audio device | Pick another entry under **Device** after **Find** |

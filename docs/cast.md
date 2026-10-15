@@ -58,19 +58,22 @@ Implements the subset needed for CastMessage / auth. Do not regenerate from `pro
 
 ## Content types
 
-`Station::content_type()` feeds LOAD. Client retries with `audio/mpeg` if the first type fails. Many radio URLs are MP3/AAC; Cast still has to fetch the URL itself (speaker needs internet/LAN reachability to the stream host).
+`Station::content_type()` selects the PC relay transport/transcoder. Cast LOAD uses the content type returned by `StreamRelay` (commonly `audio/wav` after PCM decoding), with the existing client fallback candidates. The speaker fetches only the PC LAN URL; it does not fetch or authenticate to RockServer or the original station.
 
 ## PC relay mode (`StreamRelay`)
 
-When **Via PC / Через ПК** is enabled (Cast only):
+PC relay is mandatory for every Cast output; the former Via PC checkbox and persisted mode are removed:
 
 ```text
-Station (VPN on PC) ──HTTP──► RockCast feeder ──ring──► http://LAN_IP:port/stream ──► JBL / Cast LOAD
+Station → RockServer /api/v1/stations/{id}/stream
+  → authenticated RockCast feeder → decode/ring
+  → http://LAN_IP:port/stream → JBL / Cast LOAD
 ```
 
 - Listener binds `0.0.0.0:ephemeral`; advertise IP is the LAN interface nearest the Cast device (VPN/virtual NICs skipped).
 - Accepted TCP sockets are forced **blocking** (Windows inherits non-blocking from the listener — that caused WSAEWOULDBLOCK / silent Cast IDLE).
-- One shared upstream feeder + ring; Cast LOAD starts immediately (no probe / warm wait). Spectrum taps the **relay URL** so it does not open a second station download that starves Cast over VPN.
+- One shared authenticated RockServer feeder + ring. Before LOAD, the worker waits for PCM format when needed and for the initial audio buffer. Spectrum/title data come from the relay, without a second station download.
+- Native credentials are resolved before opening the stream and again on feeder reconnects; they are never included in the LAN URL or sent to the speaker.
 - ICY titles come from the feeder; UI polls `StreamRelay::latest_title()`.
 - Windows Firewall / firewalld may prompt once for inbound LAN access — allow it or Cast cannot pull the relay.
 

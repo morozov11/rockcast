@@ -85,7 +85,6 @@ pub(super) struct PendingRemoteCommand {
 #[derive(Clone)]
 pub(super) enum RemoteOutput {
     Local,
-    Chromecast(Option<String>),
     Relay(Option<String>),
 }
 
@@ -182,8 +181,6 @@ pub struct RockCastApp {
     pub(super) playing_local: bool,
     pub(super) playing_url: Option<String>,
     pub(super) eq_enabled: bool,
-    /// Relay station through PC LAN HTTP for Cast (VPN-friendly).
-    pub(super) cast_relay: bool,
     pub(super) eq_levels: [f32; BANDS],
     pub(super) eq_peaks: [f32; BANDS],
     pub(super) observers: StreamObservers,
@@ -242,7 +239,6 @@ impl RockCastApp {
         let settings = AppSettings::load();
         let volume = settings.volume.clamp(0, 100);
         let eq_enabled = settings.eq_enabled;
-        let cast_relay = settings.cast_relay;
         let lang = settings.language;
         let rockserver = RuntimeConfig::for_app();
         log::info!("RockServer configuration loaded");
@@ -324,7 +320,6 @@ impl RockCastApp {
             playing_local: false,
             playing_url: None,
             eq_enabled,
-            cast_relay,
             eq_levels: [0.08; BANDS],
             eq_peaks: [0.08; BANDS],
             observers: StreamObservers::new(),
@@ -444,7 +439,7 @@ impl eframe::App for RockCastApp {
         let snap = PlaybackSnapshot {
             playing: self.playing,
             eq_enabled: self.eq_enabled,
-            cast_relay: self.cast_relay,
+            cast_relay: self.playback.relay_active(),
             playing_local: self.playing_local,
             fast_repaint: needs_fast_repaint,
             sync: self
@@ -542,13 +537,10 @@ impl RockCastApp {
             volume: self.volume,
             output_mode: match &self.output {
                 RemoteOutput::Local => "local",
-                RemoteOutput::Chromecast(_) => "chromecast",
                 RemoteOutput::Relay(_) => "relay",
             },
             receiver_id: match &self.output {
-                RemoteOutput::Chromecast(receiver_id) | RemoteOutput::Relay(receiver_id) => {
-                    receiver_id.clone()
-                }
+                RemoteOutput::Relay(receiver_id) => receiver_id.clone(),
                 RemoteOutput::Local => None,
             },
         };
